@@ -149,7 +149,11 @@ PY
 
 # 5. 提交 + 打 tag + 推送
 git add Cargo.toml Cargo.lock
-git commit -m "chore: bump version to ${NEW}"
+if git diff --cached --quiet; then
+    echo "ℹ️  版本号与当前提交一致，无需新提交（直接打 tag）"
+else
+    git commit -m "chore: bump version to ${NEW}"
+fi
 
 echo "🚀 创建并推送 ${TAG} ……"
 git tag -a "$TAG" -m "release: $TAG"
