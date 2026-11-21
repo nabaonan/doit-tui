@@ -1,0 +1,33 @@
+name: CI
+
+# 普通提交（push main / PR）只做轻量校验：单元测试 + release 构建校验。
+# 三平台出包仅由 release.yml（打 v* tag）触发，避免每次 push 都跑昂贵的并行构建。
+on:
+  push:
+    branches: [ 'main' ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 单元测试与构建校验
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 启用构建缓存
+        uses: swatinem/rust-cache@v2
+
+      - name: 单元测试
+        run: cargo test --all-targets
+
+      - name: Release 构建校验
+        run: cargo build --release

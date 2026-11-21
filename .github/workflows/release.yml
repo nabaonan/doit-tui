@@ -1,0 +1,139 @@
+# 打 v* tag 时：各平台独立 job 构建 release 二进制 → 上传产物 → release job 汇总发布 GitHub Release。
+# 手动触发（workflow_dispatch）：只构建并上传产物，不创建 Release（避免误发）。
+name: Release CI
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS（${{ matrix.target }}）
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ aarch64-apple-darwin, x86_64-apple-darwin ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: 构建 ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: 整理产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/doit-tui dist/doit-tui_${{ github.ref_name }}-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: 构建
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: 整理产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/doit-tui.exe dist/doit-tui_${{ github.ref_name }}_win-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: 构建
+        run: cargo build --release
+
+      - name: 整理产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/doit-tui dist/doit-tui_${{ github.ref_name }}_linux-x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: 汇总并发布 GitHub Release
+    needs: [ macos, windows, linux ]
+    # 只有 tag 触发才发布；workflow_dispatch 走到这里会被跳过（只保留上面构建的产物）
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出（取 tag 与仓库元信息）
+        uses: actions/checkout@v4
+
+      - name: 下载各平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成发布说明
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > release-body.md <<MD
+
+          ## doit-tui ${VERSION}
+
+          **支持的平台**
+          - macOS：Apple Silicon + Intel
+          - Windows：x64
+          - Linux：x64
+
+          终端待办应用（WebDAV 与 doit-apk / doit-desktop / doit-site 同步），由 GitHub Actions 自动构建发布。
+          MD
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-body.md
+          files: artifacts/**

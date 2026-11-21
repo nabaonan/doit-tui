@@ -1,0 +1,10 @@
+# 构建产物
+/target
+
+# 用户本机运行时数据（含 WebDAV 凭据与真实任务数据，绝不入库）
+/doit-tui-data/
+~/.doit-tui/
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
