@@ -118,10 +118,10 @@ ver = sys.argv[1]
 # Cargo.toml [package] version（只改第一个）
 p = 'Cargo.toml'
 s = open(p, encoding='utf-8').read()
-s2 = re.sub(r'(?m)^version = "[^"]+"$', f'version = "{ver}"', s, count=1)
-if s2 == s:
+if not re.search(r'(?m)^version = "[^"]+"$', s):
     raise SystemExit('Cargo.toml 未匹配到 version 行')
-open(p, 'w', encoding='utf-8').write(s2)
+s = re.sub(r'(?m)^version = "[^"]+"$', f'version = "{ver}"', s, count=1)
+open(p, 'w', encoding='utf-8').write(s)
 print('   Cargo.toml ->', ver)
 
 # Cargo.lock [[package]] name = "doit-tui" 的 version（跳过原 version 行防 TOML duplicate key）
