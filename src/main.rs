@@ -295,9 +295,8 @@ mod key_tests {
     use crate::store::Store;
 
     fn test_app() -> (Store, App) {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-key-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-key-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-key-test");
         let mut app = App::new(&store);
         app.sel = Some(app.snap.tasks[0].id.clone());
         (store, app)
@@ -448,9 +447,8 @@ mod key_tests {
     #[test]
     fn calendar_day_navigation() {
         use chrono::Datelike;
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-cal-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-cal-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-cal-test");
         let mut app = App::new(&store);
         let today = chrono::Local::now().date_naive();
         assert_eq!(app.cal_sel, today, "初始选中今天");
@@ -475,9 +473,8 @@ mod key_tests {
 
     #[test]
     fn nested_subtasks_unlimited() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-nest-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-nest-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-nest-test");
         let mut app = App::new(&store);
         use crate::model::{find_sub, subtree_done};
 
@@ -530,9 +527,8 @@ mod key_tests {
 
     #[test]
     fn webdav_config_edit_roundtrip() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-webdav-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-webdav-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-webdav-test");
         let mut app = App::new(&store);
         app.page = Page::Settings;
 
@@ -589,11 +585,13 @@ mod key_tests {
         press(&mut app, &store, KeyCode::Esc);
         assert!(app.del_cat_modal.is_none());
         assert!(app.snap.categories.iter().any(|c| c.name == "学习"));
-        // 再次弹出并确认：分类删除，其任务移入「默认」，过滤回到「全部」
+        // 再次弹出并确认：分类打墓碑（不物理移除，供跨端同步传播删除），其任务移入「默认」，过滤回到「全部」
         press(&mut app, &store, KeyCode::Char('x'));
         press(&mut app, &store, KeyCode::Enter);
         assert!(app.del_cat_modal.is_none());
-        assert!(!app.snap.categories.iter().any(|c| c.name == "学习"));
+        let deleted = app.snap.categories.iter().find(|c| c.name == "学习").unwrap();
+        assert!(deleted.deleted_at.is_some(), "删除的分类应打墓碑而非物理移除");
+        assert!(!app.snap.active_categories().any(|c| c.name == "学习"), "活跃分类里不应再有被删分类");
         assert_eq!(app.cat, "全部");
         let t4 = app.snap.tasks.iter().find(|t| t.id == "t4").unwrap();
         assert_eq!(t4.category, "默认", "被删分类的任务应移入「默认」");
@@ -620,9 +618,8 @@ mod render_tests {
 
     #[test]
     fn dump_first_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-render-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-render-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-render-test");
         let mut app = App::new(&store);
         app.sel = Some(app.snap.tasks[0].id.clone());
         app.expanded.clear();
@@ -643,9 +640,8 @@ mod render_tests {
 
     #[test]
     fn dump_modal_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-modal-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-modal-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-modal-test");
         let mut app = App::new(&store);
         app.open_cat_modal();
         app.cat_modal_char('测');
@@ -666,9 +662,8 @@ mod render_tests {
 
     #[test]
     fn dump_del_cat_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-delcat-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-delcat-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-delcat-test");
         let mut app = App::new(&store);
         app.cat = "工作".into();
         app.open_del_cat_modal();
@@ -688,9 +683,8 @@ mod render_tests {
 
     #[test]
     fn dump_stats_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-stats-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-stats-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-stats-test");
         let mut app = App::new(&store);
         app.page = Page::Stats;
         let backend = TestBackend::new(100, 30);
@@ -709,9 +703,8 @@ mod render_tests {
 
     #[test]
     fn stats_canvas_bg_follows_theme() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-statsbg-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-statsbg-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-statsbg-test");
         let mut app = App::new(&store);
         app.page = Page::Stats;
         let backend = TestBackend::new(100, 30);
@@ -733,9 +726,8 @@ mod render_tests {
 
     #[test]
     fn dump_calendar_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-cal-render") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-cal-render");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-cal-render");
         let mut app = App::new(&store);
         app.page = Page::Calendar;
         let backend = TestBackend::new(100, 34);
@@ -755,9 +747,8 @@ mod render_tests {
     #[test]
     fn dump_heat_scopes() {
         use crate::app::HeatScope;
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-heat-test") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-heat-test");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-heat-test");
         let mut app = App::new(&store);
         app.page = Page::Stats;
         for scope in [HeatScope::Week, HeatScope::Month, HeatScope::Year] {
@@ -779,9 +770,8 @@ mod render_tests {
 
     #[test]
     fn dump_composer_frame() {
-        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-render-test2") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-render-test2");
-        let store = Store::new();
+        let store = Store::with_dir("/tmp/doit-tui-render-test2");
         let mut app = App::new(&store);
         app.sel = Some(app.snap.tasks[0].id.clone());
         app.open_input(InputMode::AddTask);

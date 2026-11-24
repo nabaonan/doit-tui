@@ -169,7 +169,7 @@ impl App {
         };
         let _ = theme;
         let mut expanded = Vec::new();
-        if let Some(t) = snap.tasks.iter().find(|t| !t.subs.is_empty()) {
+        if let Some(t) = snap.tasks.iter().filter(|t| t.deleted_at.is_none()).find(|t| !t.subs.is_empty()) {
             expanded.push(t.id.clone());
         }
         let today = chrono::Local::now();
@@ -228,9 +228,9 @@ impl App {
 
     pub fn cat_tasks(&self) -> Vec<&Task> {
         if self.cat == "全部" {
-            self.snap.tasks.iter().collect()
+            self.snap.active_tasks().collect()
         } else {
-            self.snap.tasks.iter().filter(|t| t.category == self.cat).collect()
+            self.snap.tasks.iter().filter(|t| t.deleted_at.is_none() && t.category == self.cat).collect()
         }
     }
 
@@ -238,7 +238,7 @@ impl App {
         self.snap
             .tasks
             .iter()
-            .filter(|t| (cat == "全部" || t.category == cat) && !t.done)
+            .filter(|t| t.deleted_at.is_none() && (cat == "全部" || t.category == cat) && !t.done)
             .count()
     }
 
@@ -352,21 +352,23 @@ impl App {
     }
 
     pub fn del_selected(&mut self, store: &Store) {
-        use crate::model::{remove_sub, subs_contain};
+        use crate::model::{find_sub, subs_contain, tombstone_sub};
         let id = match &self.sel {
             Some(i) => i.clone(),
             None => return,
         };
-        // 顶级任务删除
-        if let Some(pos) = self.snap.tasks.iter().position(|t| t.id == id) {
-            let title = self.snap.tasks[pos].title.clone();
-            self.snap.tasks.remove(pos);
+        let now = now_ms();
+        // 顶级任务删除：打墓碑（不物理移除），跨端同步才能传播删除。
+        if let Some(t) = self.snap.tasks.iter_mut().find(|t| t.id == id) {
+            let title = t.title.clone();
+            t.deleted_at = Some(now);
+            t.updated_at = now;
             self.mark_dirty(store);
             self.toast(format!("已删除：{}", title));
             self.ensure_selection();
             return;
         }
-        // 任意深度子任务删除：找到其所在顶级任务，递归移除
+        // 任意深度子任务删除：找到其所在顶级任务，递归打墓碑。
         if let Some(pid) = self
             .snap
             .tasks
@@ -375,9 +377,10 @@ impl App {
             .map(|t| t.id.clone())
         {
             if let Some(t) = self.snap.tasks.iter_mut().find(|t| t.id == pid) {
-                if let Some(removed) = remove_sub(&mut t.subs, &id) {
-                    t.updated_at = now_ms();
-                    let title = removed.title.clone();
+                if let Some(node) = find_sub(&t.subs, &id) {
+                    let title = node.title.clone();
+                    tombstone_sub(&mut t.subs, &id, now);
+                    t.updated_at = now;
                     self.snap.recalc_parent(&pid);
                     self.mark_dirty(store);
                     self.toast(format!("已删除子任务：{}", title));
@@ -470,7 +473,7 @@ impl App {
     }
 
     pub fn cycle_cat(&mut self, delta: i32) {        let mut names: Vec<String> = vec!["全部".into()];
-        names.extend(self.snap.categories.iter().map(|c| c.name.clone()));
+        names.extend(self.snap.active_categories().map(|c| c.name.clone()));
         let cur = names
             .iter()
             .position(|n| *n == self.cat)
@@ -481,14 +484,17 @@ impl App {
 
     pub fn add_category(&mut self, store: &Store, name: &str, color: &str) -> bool {
         if name.is_empty()
-            || self.snap.categories.iter().any(|c| c.name == name)
+            || self.snap.active_categories().any(|c| c.name == name)
         {
             self.toast("分类已存在或名称为空");
             return false;
         }
         self.snap.categories.push(Category {
             name: name.into(),
-            color: color.into(),
+            color: crate::theme::normalize_category_color(color),
+            sort_order: self.snap.categories.len() as i64,
+            updated_at: now_ms(),
+            deleted_at: None,
         });
         self.cat = name.into();
         self.mark_dirty(store);
@@ -523,17 +529,19 @@ impl App {
         self.delete_category(store, &m.name);
     }
 
-    /// 删除分类：其下任务移入「默认」（数据不丢），任务 updated_at 刷新以参与同步合并。
+    /// 删除分类：打墓碑（不物理移除），其下任务移入「默认」（数据不丢），
+    /// 分类墓碑随同步传播，避免被其它端的旧快照复活。
     pub fn delete_category(&mut self, store: &Store, name: &str) {
-        let Some(pos) = self.snap.categories.iter().position(|c| c.name == name) else {
+        let now = now_ms();
+        let Some(c) = self.snap.categories.iter_mut().find(|c| c.name == name && c.deleted_at.is_none()) else {
             self.toast("分类不存在");
             return;
         };
-        self.snap.categories.remove(pos);
-        let now = now_ms();
+        c.deleted_at = Some(now);
+        c.updated_at = now;
         let mut moved = 0usize;
         for t in self.snap.tasks.iter_mut() {
-            if t.category == name {
+            if t.category == name && t.deleted_at.is_none() {
                 t.category = "默认".into();
                 t.updated_at = now;
                 moved += 1;
@@ -647,7 +655,7 @@ impl App {
     pub fn input_cycle_cat(&mut self) {
         if let Some(inp) = &mut self.input {
             if inp.mode == InputMode::AddTask {
-                let mut names: Vec<String> = self.snap.categories.iter().map(|c| c.name.clone()).collect();
+                let mut names: Vec<String> = self.snap.active_categories().map(|c| c.name.clone()).collect();
                 if names.is_empty() {
                     names.push("默认".into());
                 }
@@ -686,6 +694,8 @@ impl App {
                     updated_at: now,
                     completed_at: None,
                     subs: vec![],
+                    deleted_at: None,
+                    sort_order: -1, // 新建置顶
                 };
                 let title = task.title.clone();
                 self.snap.tasks.insert(0, task);
@@ -714,6 +724,8 @@ impl App {
                         updated_at: now,
                         completed_at: None,
                         subs: Vec::new(),
+                        deleted_at: None,
+                        sort_order: subs.len() as i64,
                     });
                     sid
                 };
@@ -892,6 +904,9 @@ fn parse_pri_suffix(raw: &str) -> Option<(String, u8)> {
 /// 递归收集可见子任务行：(id, 深度)。未被展开的节点不进入子级。
 fn collect_subs(rows: &mut Vec<(String, u8)>, subs: &[crate::model::Subtask], depth: u8, expanded: &[String]) {
     for s in subs {
+        if s.deleted_at.is_some() {
+            continue; // 墓碑子任务不显示
+        }
         rows.push((s.id.clone(), depth));
         if expanded.iter().any(|e| e == &s.id) {
             collect_subs(rows, &s.subs, depth + 1, expanded);

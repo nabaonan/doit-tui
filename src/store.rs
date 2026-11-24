@@ -53,6 +53,12 @@ impl Store {
         Self { dir }
     }
 
+    /// 测试专用：直接指定数据目录，避免并行测试通过全局环境变量互相干扰。
+    #[cfg(test)]
+    pub fn with_dir(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -72,7 +78,7 @@ impl Store {
             return Ok(self.seed());
         }
         let raw = std::fs::read_to_string(&p)?;
-        let snap: Snapshot = serde_json::from_str(&raw)
+        let snap = crate::model::parse_snapshot(&raw)
             .with_context(|| format!("解析 data.json 失败: {}", p.display()))?;
         Ok(snap)
     }
@@ -101,10 +107,16 @@ impl Store {
     }
 
     pub fn load_sync_base(&self) -> Option<Snapshot> {
-        std::fs::read_to_string(self.path("sync-base.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<SyncBase>(&raw).ok())
-            .and_then(|b| b.snapshot)
+        let raw = std::fs::read_to_string(self.path("sync-base.json")).ok()?;
+        // base 既有新格式（顶层即 WireSnapshot），也有旧格式（SyncBase { snapshot: ... } 包装）。
+        if let Ok(wire) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if wire.get("snapshot").is_some() && wire.get("version").is_none() {
+                if let Ok(base) = serde_json::from_value::<SyncBase>(wire) {
+                    return base.snapshot;
+                }
+            }
+        }
+        crate::model::parse_snapshot(&raw).ok()
     }
 
     pub fn save_sync_base(&self, snap: &Snapshot) -> Result<()> {
@@ -123,14 +135,18 @@ impl Store {
         let now = crate::model::now_ms();
         let mut snap = Snapshot::new(&device_id());
         snap.categories = vec![
-            ("工作", "#4A86D6"),
-            ("生活", "#4FBF9E"),
-            ("学习", "#EF9F27"),
+            ("工作", "#5AA9E6"),
+            ("生活", "#34C7A8"),
+            ("学习", "#A78BFA"),
         ]
         .into_iter()
-        .map(|(name, color)| crate::model::Category {
+        .enumerate()
+        .map(|(i, (name, color))| crate::model::Category {
             name: name.into(),
             color: color.into(),
+            sort_order: i as i64,
+            updated_at: now,
+            deleted_at: None,
         })
         .collect();
 
@@ -143,6 +159,8 @@ impl Store {
             updated_at: now,
             completed_at: if done { Some(now) } else { None },
             subs: Vec::new(),
+            deleted_at: None,
+            sort_order: 0,
         };
 
         let mk = |id: &str, title: &str, cat: &str, pri: u8, done: bool, subs: Vec<crate::model::Subtask>| crate::model::Task {
@@ -155,6 +173,8 @@ impl Store {
             updated_at: now,
             completed_at: if done { Some(now) } else { None },
             subs,
+            deleted_at: None,
+            sort_order: 0,
         };
 
         snap.tasks = vec![

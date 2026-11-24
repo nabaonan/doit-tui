@@ -152,7 +152,7 @@ fn completion_by_day(app: &App) -> BTreeMap<chrono::NaiveDate, u32> {
             walk(&s.subs, bump, map);
         }
     }
-    for t in &app.snap.tasks {
+    for t in app.snap.active_tasks() {
         if let Some(c) = t.completed_at {
             bump(c, &mut map);
         }

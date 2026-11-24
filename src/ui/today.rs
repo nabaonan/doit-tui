@@ -86,7 +86,7 @@ fn find<'a>(
     &'a [crate::model::Subtask],
 )> {
     use crate::model::find_sub;
-    for t in &app.snap.tasks {
+    for t in app.snap.active_tasks() {
         if t.id == id {
             return Some((t.title.clone(), t.priority, t.done, 0, &t.category, &t.subs));
         }

@@ -68,7 +68,7 @@ fn draw_grid(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             }
         }
         let mut m: BTreeMap<chrono::NaiveDate, u32> = BTreeMap::new();
-        for t in &app.snap.tasks {
+        for t in app.snap.active_tasks() {
             if let Some(c) = t.completed_at {
                 let d = crate::model::completed_on(c);
                 *m.entry(d).or_insert(0) += 1;
@@ -168,7 +168,7 @@ fn day_items<'a>(app: &'a App, day: chrono::NaiveDate, theme: &'a Theme) -> (usi
     let mut lines: Vec<Line> = Vec::new();
     let mut done_all = 0usize;
 
-    for t in &app.snap.tasks {
+    for t in app.snap.active_tasks() {
         let cat_color = app
             .snap
             .categories

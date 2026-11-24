@@ -11,10 +11,33 @@ pub const PRIORITY_MID: Color = Color::Rgb(0x4A, 0x86, 0xD6);
 pub const PRIORITY_HIGH: Color = Color::Rgb(0xE0, 0x8A, 0x34);
 pub const PRIORITY_URGENT: Color = Color::Rgb(0xDE, 0x5B, 0x55);
 
-/// 分类内置色卡（8 色，与原型一致）。
+/// 分类内置色板 —— 与手机端 doit-apk `Color.kt` PaletteColors、桌面端 `constants/tokens.ts`
+/// CATEGORY_SWATCHES 严格一致，三端必须同步修改，否则同一分类在两端会显示成不同颜色。
+/// 统一带 # 大写存储；薄荷绿打头，整体清新。
 pub const CAT_PALETTE: [&str; 8] = [
-    "#4A86D6", "#4FBF9E", "#EF9F27", "#DE5B55", "#7F77DD", "#D4537E", "#1D9E75", "#3AA6C9",
+    "#34C7A8", "#5AA9E6", "#F2A65A", "#A78BFA", "#22B8CF", "#F08A8A", "#AACB5E", "#7C96B0",
 ];
+
+/// 分类颜色非法/缺失时的回退色（与桌面端 DEFAULT_CATEGORY_COLOR 一致）。
+pub const DEFAULT_CATEGORY_COLOR: &str = "#34C7A8";
+
+/// 把任意分类色规范为合法的 #RRGGBB（对应桌面端 domain/color.ts 的 normalizeCategoryColor）：
+/// trim → 无 # 则补 # → 仅 6 位 hex 合法并转大写 → 否则回退默认色。
+/// 目的：手机端历史数据不带 # 的值（如 `5B9BD5`）也能补 # 匹配色板回显。
+pub fn normalize_category_color(color: &str) -> String {
+    let trimmed = color.trim();
+    let with_hash = if trimmed.starts_with('#') {
+        trimmed.to_string()
+    } else {
+        format!("#{trimmed}")
+    };
+    let hex = with_hash.strip_prefix('#').unwrap_or("");
+    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("#{}", with_hash[1..].to_ascii_uppercase())
+    } else {
+        DEFAULT_CATEGORY_COLOR.to_string()
+    }
+}
 
 pub fn priority_color(p: u8) -> Option<Color> {
     match p {
@@ -36,19 +59,21 @@ pub fn priority_label(p: u8) -> Option<&'static str> {
     }
 }
 
-/// "#RRGGBB" → ratatui Color；解析失败返回灰色。
+/// "#RRGGBB"（或历史不带 # 的值）→ ratatui Color；非法值回退统一默认色。
+/// 先归一化再解析，保证手机端不带 # 的历史色也能正确显示。
 pub fn hex_color(s: &str) -> Color {
-    let s = s.trim_start_matches('#');
-    if s.len() == 6 {
+    let normalized = normalize_category_color(s);
+    let hex = normalized.strip_prefix('#').unwrap_or(&normalized);
+    if hex.len() == 6 {
         if let (Ok(r), Ok(g), Ok(b)) = (
-            u8::from_str_radix(&s[0..2], 16),
-            u8::from_str_radix(&s[2..4], 16),
-            u8::from_str_radix(&s[4..6], 16),
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
         ) {
             return Color::Rgb(r, g, b);
         }
     }
-    Color::Rgb(0x88, 0x87, 0x80)
+    Color::Rgb(0x34, 0xC7, 0xA8)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

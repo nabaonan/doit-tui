@@ -154,7 +154,7 @@ pub fn draw_catbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         None,
         theme,
     );
-    for c in &app.snap.categories {
+    for c in app.snap.active_categories() {
         pill(
             &mut spans,
             c.color.clone(),
@@ -411,9 +411,9 @@ pub fn draw_del_cat_modal(f: &mut Frame, app: &App, theme: &Theme) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let cat = app.snap.categories.iter().find(|c| c.name == m.name);
+    let cat = app.snap.active_categories().find(|c| c.name == m.name);
     let dot_color = cat.map(|c| c.color.as_str()).unwrap_or("#888780");
-    let task_count = app.snap.tasks.iter().filter(|t| t.category == m.name).count();
+    let task_count = app.snap.active_tasks().filter(|t| t.category == m.name).count();
     let pending = app.cat_pending(&m.name);
 
     let lines = vec![

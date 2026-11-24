@@ -6,9 +6,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use serde_json::Value;
 
-use crate::model::Snapshot;
+use crate::model::{Snapshot, WireCategory, WireSnapshot, WireTask};
 use crate::store::{Store, WebDavSettings};
 
 pub fn remote_file_name(cfg: &WebDavSettings) -> String {
@@ -71,406 +70,353 @@ pub fn sync(store: &Store, local: &Snapshot, cfg: &WebDavSettings) -> Result<(Sn
     let file = remote_file_name(cfg);
     let base = store.load_sync_base();
 
-    let remote = match dav_get(cfg, &file)? {
+    // 统一在桌面端 wire 契约上做合并（camelCase + 扁平 + 墓碑）。
+    let local_wire = WireSnapshot::from(local.clone());
+    let base_wire = base.as_ref().map(|b| WireSnapshot::from(b.clone()));
+    let remote_wire: Option<WireSnapshot> = match dav_get(cfg, &file)? {
         None => None,
         Some(raw) if raw.trim().is_empty() => None,
-        Some(raw) => Some(
-            serde_json::from_str::<Snapshot>(&raw)
-                .with_context(|| "远端快照解析失败（契约不一致？）".to_string())?,
-        ),
+        Some(raw) => {
+            // 远端可能是桌面端/手机端的新 wire 格式，也可能是旧格式；统一走兼容解析后转 wire。
+            let snap = crate::model::parse_snapshot(&raw)
+                .with_context(|| "远端快照解析失败（契约不一致？）".to_string())?;
+            Some(WireSnapshot::from(snap))
+        }
     };
 
-    let merged = merge(&base, local, remote.as_ref());
-    let mut merged = merged;
-    merged.device_id = local.device_id.clone();
-    merged.version = crate::model::SNAPSHOT_VERSION;
-    merged.revision = merged
-        .revision
-        .max(local.revision)
-        .max(remote.as_ref().map(|r| r.revision).unwrap_or(0))
-        + 1;
+    let merged_wire = merge_wire(base_wire.as_ref(), &local_wire, remote_wire.as_ref());
+    let mut merged_wire = merged_wire;
+    merged_wire.device_id = local.device_id.clone();
+    merged_wire.version = crate::model::SNAPSHOT_VERSION;
+    let task_count = merged_wire.tasks.len();
+    let merged: Snapshot = merged_wire.into();
 
-    dav_put(cfg, &file, &serde_json::to_string(&merged)?)?;
+    dav_put(cfg, &file, &serde_json::to_string(&WireSnapshot::from(merged.clone()))?)?;
     store.save_sync_base(&merged)?;
-    let note = format!("同步完成 · r{} · {} 个任务", merged.revision, merged.tasks.len());
+    let note = format!("同步完成 · r{} · {} 个任务", merged.revision, task_count);
     Ok((merged, note))
 }
 
-/// 三方合并。base 为 None 时：本地与远端共存合并（按 id 去重、新者胜）。
-pub fn merge(base: &Option<Snapshot>, local: &Snapshot, remote: Option<&Snapshot>) -> Snapshot {
-    let Some(remote) = remote else {
-        let out = local.clone();
-        return out;
-    };
-    let Some(base) = base else {
-        // 无 base：直接做本地/远端双源合并
-        return merge_pair(local, remote);
-    };
+/// 桌面端 domain/merge.ts 的字段级三方合并（在 wire 契约上执行）。
+/// 语义：并集保留、字段级合并、同字段冲突按 effectiveTime 取新（平局远程优先）、
+/// 墓碑删除（删除后对方真编辑才复活）、陈旧远端检测。
 
+fn effective_time(t: &WireTask) -> i64 {
+    [
+        t.updated_at,
+        t.completed_at.unwrap_or(0),
+        t.deleted_at.unwrap_or(0),
+        t.created_at,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0)
+}
+
+pub fn is_stale_remote(remote: &WireSnapshot, local: &WireSnapshot) -> bool {
+    remote.exported_at < local.exported_at && remote.revision <= local.revision
+}
+
+/// 稳定序列化用于内容指纹比较（对象键排序，这里 structs 字段固定，直接 serde_json 即可）。
+#[allow(dead_code)]
+fn same_task(a: &WireTask, b: &WireTask) -> bool {
+    a == b
+}
+#[allow(dead_code)]
+fn same_cat(a: &WireCategory, b: &WireCategory) -> bool {
+    a == b
+}
+
+fn merge_task(local: &WireTask, remote: &WireTask, base: Option<&WireTask>) -> WireTask {
     let mut out = local.clone();
-    out.categories = merge_named(
-        &base.categories,
-        &local.categories,
-        &remote.categories,
-        |c| &c.name,
-    );
-    out.tasks = merge_vec3(
-        &base.tasks,
-        &local.tasks,
-        &remote.tasks,
-        |t| &t.id,
-        |t| t.updated_at,
-    );
+    let le = effective_time(local);
+    let re = effective_time(remote);
+    // TASK_FIELDS: parentUid, title, category, priority, done, completedAt, createdAt, deletedAt, depth, sortOrder
+    // 逐字段合并；这里对每个字段用 (local,remote,base) 的三方规则。
+    macro_rules! merge_field {
+        ($field:ident) => {{
+            let lv = local.$field.clone();
+            let rv = remote.$field.clone();
+            let bv = base.map(|b| b.$field.clone());
+            let local_changed = bv.is_none() || lv != bv.clone().unwrap();
+            let remote_changed = bv.is_none() || rv != bv.clone().unwrap();
+            if local_changed && !remote_changed {
+                out.$field = lv;
+            } else if !local_changed && remote_changed {
+                out.$field = rv;
+            } else if local_changed && remote_changed && lv != rv {
+                out.$field = if le > re { lv } else { rv }; // 平局远程优先
+            } else if let Some(b) = bv {
+                out.$field = b;
+            }
+        }};
+    }
+    merge_field!(parent_uid);
+    merge_field!(title);
+    merge_field!(category);
+    merge_field!(priority);
+    merge_field!(done);
+    merge_field!(completed_at);
+    merge_field!(created_at);
+    merge_field!(deleted_at);
+    merge_field!(depth);
+    merge_field!(sort_order);
+
+    // 墓碑 vs 编辑：删除之后对方又编辑过 → 撤销删除（编辑胜），否则删除生效。
+    let ldel = local.deleted_at;
+    let rdel = remote.deleted_at;
+    if ldel.is_some() || rdel.is_some() {
+        if ldel.is_some() && rdel.is_none() && re > ldel.unwrap() {
+            out.deleted_at = None;
+        } else if rdel.is_some() && ldel.is_none() && le > rdel.unwrap() {
+            out.deleted_at = None;
+        } else {
+            out.deleted_at = Some(ldel.unwrap_or(0).max(rdel.unwrap_or(0))).filter(|v| *v != 0);
+        }
+    }
+    // 完成态自洽
+    if !out.done { out.completed_at = None; }
+    if out.done && out.completed_at.is_none() { out.completed_at = Some(le.max(re)); }
+    out.updated_at = le.max(re);
+    out.uid = local.uid.clone();
     out
 }
 
-/// 本地 / 远端双源合并（无 base 情况）：按 id 对齐，冲突新者胜，其余并集。
-fn merge_pair(a: &Snapshot, b: &Snapshot) -> Snapshot {
-    let mut out = a.clone();
-    for c in &b.categories {
-        if !out.categories.iter().any(|x| x.name == c.name) {
-            out.categories.push(c.clone());
+fn merge_category(local: &WireCategory, remote: &WireCategory, base: Option<&WireCategory>) -> WireCategory {
+    let ldel = local.deleted_at;
+    let rdel = remote.deleted_at;
+    if ldel.is_some() || rdel.is_some() {
+        if ldel.is_some() && rdel.is_some() {
+            let newer = if ldel.unwrap() >= rdel.unwrap() { local } else { remote };
+            let mut c = newer.clone();
+            c.deleted_at = Some(ldel.unwrap().max(rdel.unwrap()));
+            c.updated_at = local.updated_at.max(remote.updated_at);
+            return c;
         }
-    }
-    for t in &b.tasks {
-        match out.tasks.iter_mut().find(|x| x.id == t.id) {
-            Some(x) => {
-                if t.updated_at > x.updated_at {
-                    *x = t.clone();
-                }
-            }
-            None => out.tasks.push(t.clone()),
+        let dead = if ldel.is_some() { local } else { remote };
+        let live = if ldel.is_some() { remote } else { local };
+        let dead_at = dead.deleted_at.unwrap();
+        // 用「可见内容（color/sortOrder）相对 base 是否真变化」判断编辑，不看 updatedAt，
+        // 避免同步回写刷新 updatedAt 导致已删分类被误复活。
+        let live_edited = base.map(|b| {
+            live.color != b.color || live.sort_order != b.sort_order
+        }).unwrap_or(false);
+        let delete_wins = !live_edited || live.updated_at <= dead_at;
+        if delete_wins {
+            let mut c = dead.clone();
+            c.deleted_at = Some(dead_at);
+            c.updated_at = local.updated_at.max(remote.updated_at);
+            return c;
         }
+        // 删除后真编辑过 → 复活
+        let mut c = live.clone();
+        c.deleted_at = None;
+        c.updated_at = local.updated_at.max(remote.updated_at);
+        return c;
     }
+    let mut out = local.clone();
+    for (lv, rv, bv) in [
+        (&local.color, &remote.color, base.map(|b| &b.color)),
+    ] {
+        let lc = bv.map(|b| lv != b).unwrap_or(true);
+        let rc = bv.map(|b| rv != b).unwrap_or(true);
+        if lc && !rc { out.color = lv.clone(); }
+        else if !lc && rc { out.color = rv.clone(); }
+        else if lc && rc && lv != rv { out.color = if local.updated_at > remote.updated_at { lv.clone() } else { rv.clone() }; }
+        else if let Some(b) = bv { out.color = b.clone(); }
+    }
+    // sortOrder 字段
+    let (lv, rv, bv) = (local.sort_order, remote.sort_order, base.map(|b| b.sort_order));
+    let lc = bv.map(|b| lv != b).unwrap_or(true);
+    let rc = bv.map(|b| rv != b).unwrap_or(true);
+    if lc && !rc { out.sort_order = lv; }
+    else if !lc && rc { out.sort_order = rv; }
+    else if lc && rc && lv != rv { out.sort_order = if local.updated_at > remote.updated_at { lv } else { rv }; }
+    else if let Some(b) = bv { out.sort_order = b; }
+    out.name = local.name.clone();
+    out.updated_at = local.updated_at.max(remote.updated_at);
     out
 }
 
-/// 按 key + updated_at 的通用三方合并（Vec，元素有 id 与 updated_at）。
-fn merge_vec3<T, K, U>(
-    base: &[T],
-    local: &[T],
-    remote: &[T],
-    key: K,
-    updated: U,
-) -> Vec<T>
-where
-    K: Fn(&T) -> &str,
-    U: Fn(&T) -> i64,
-    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
-{
-    let val = |t: &T| serde_json::to_value(t).unwrap_or(Value::Null);
-    let mut out: Vec<T> = Vec::new();
-
-    let mut all_keys: Vec<String> = Vec::new();
-    for e in base.iter().chain(local).chain(remote) {
-        let k = key(e).to_string();
-        if !all_keys.contains(&k) {
-            all_keys.push(k);
-        }
+/// 三方合并入口。base=None 时：本地与远端做字段级双源合并（base 视作空）。
+pub fn merge_wire(base: Option<&WireSnapshot>, local: &WireSnapshot, remote: Option<&WireSnapshot>) -> WireSnapshot {
+    let Some(remote) = remote else {
+        return local.clone();
+    };
+    // 陈旧远端短路：远端更旧且 revision 不高于本地 → 直接用本地，跳过合并。
+    if is_stale_remote(remote, local) {
+        let mut out = local.clone();
+        out.revision = local.revision.max(remote.revision);
+        return out;
     }
 
-    for k in all_keys {
-        let b = base.iter().find(|e| key(e) == k);
-        let l = local.iter().find(|e| key(e) == k);
-        let r = remote.iter().find(|e| key(e) == k);
-        let picked = match (b, l, r) {
-            (None, None, None) => None,
-            // 仅一侧存在：取存在的一侧（新增或删除语义一致）
-            (None, Some(l), None) | (None, None, Some(l)) => Some(l.clone()),
-            (None, Some(l), Some(r)) => {
-                // 双侧新增：新者胜
-                Some(if updated(l) >= updated(r) {
-                    l.clone()
-                } else {
-                    r.clone()
-                })
-            }
-            (Some(_), None, None) => None, // base 有、两侧都没有 → 已删除
-            (Some(b), Some(l), None) => {
-                // 远端删除：本地未改 → 删除；本地改过 → 保留本地
-                if val(l) == val(b) {
-                    None
-                } else {
-                    Some(l.clone())
-                }
-            }
-            (Some(b), None, Some(r)) => {
-                if val(r) == val(b) {
-                    None
-                } else {
-                    Some(r.clone())
-                }
-            }
-            (Some(b), Some(l), Some(r)) => {
-                let lb = val(l) == val(b);
-                let rb = val(r) == val(b);
-                if lb && rb {
-                    Some(b.clone())
-                } else if lb {
-                    Some(r.clone())
-                } else if rb {
-                    Some(l.clone())
-                } else {
-                    // 双侧都改：updatedAt 新者胜
-                    Some(if updated(l) >= updated(r) {
-                        l.clone()
-                    } else {
-                        r.clone()
-                    })
-                }
-            }
-        };
-        if let Some(e) = picked {
-            out.push(e);
+    let empty = WireSnapshot { version: 2, revision: 0, exported_at: 0, device_id: "merge-base".into(), last_sync_at: None, categories: vec![], tasks: vec![] };
+    let b = base.unwrap_or(&empty);
+
+    use std::collections::HashMap;
+    let lt: HashMap<&str, &WireTask> = local.tasks.iter().map(|t| (t.uid.as_str(), t)).collect();
+    let rt: HashMap<&str, &WireTask> = remote.tasks.iter().map(|t| (t.uid.as_str(), t)).collect();
+    let bt: HashMap<&str, &WireTask> = b.tasks.iter().map(|t| (t.uid.as_str(), t)).collect();
+    let mut uids: Vec<&str> = lt.keys().chain(rt.keys()).copied().collect();
+    uids.sort();
+    uids.dedup();
+    let mut tasks: Vec<WireTask> = Vec::new();
+    for uid in uids {
+        let l = lt.get(uid).copied();
+        let r = rt.get(uid).copied();
+        let bb = bt.get(uid).copied();
+        match (l, r) {
+            (Some(l), Some(r)) => tasks.push(merge_task(l, r, bb)),
+            (Some(l), None) => tasks.push(l.clone()),
+            (None, Some(r)) => tasks.push(r.clone()),
+            (None, None) => {}
         }
     }
-    out
+    tasks.sort_by(|a, b| (a.depth, a.sort_order).cmp(&(b.depth, b.sort_order)).then_with(|| a.uid.cmp(&b.uid)));
+
+    let lc: HashMap<&str, &WireCategory> = local.categories.iter().map(|c| (c.name.as_str(), c)).collect();
+    let rc: HashMap<&str, &WireCategory> = remote.categories.iter().map(|c| (c.name.as_str(), c)).collect();
+    let bc: HashMap<&str, &WireCategory> = b.categories.iter().map(|c| (c.name.as_str(), c)).collect();
+    let mut names: Vec<&str> = lc.keys().chain(rc.keys()).chain(bc.keys()).copied().collect();
+    names.sort();
+    names.dedup();
+    let mut categories: Vec<WireCategory> = Vec::new();
+    for name in names {
+        let l = lc.get(name).copied();
+        let r = rc.get(name).copied();
+        let bb = bc.get(name).copied();
+        match (l, r) {
+            (Some(l), Some(r)) => categories.push(merge_category(l, r, bb)),
+            (Some(l), None) => categories.push(l.clone()),
+            (None, Some(r)) if bb.is_some() => {
+                // base 有、本地无 → 本地删除；仅当远端相对 base 更新过才恢复。
+                if r.updated_at > bb.unwrap().updated_at { categories.push(r.clone()); }
+            }
+            (None, Some(r)) => categories.push(r.clone()),
+            (None, None) => {}
+        }
+    }
+    let now = local.exported_at.max(remote.exported_at);
+    WireSnapshot {
+        version: 2,
+        revision: local.revision.max(remote.revision) + 1,
+        exported_at: now,
+        device_id: local.device_id.clone(),
+        last_sync_at: Some(now),
+        categories,
+        tasks,
+    }
 }
 
-/// 分类合并（按 name 对齐、无时间戳）。
-/// 分类实体只有 name/color，用「与 base 是否相同」判断改动，实现删除语义：
-/// - 一侧删除、另一侧未改 → 跟随删除（否则被删分类会从远端复活）
-/// - 一侧删除、另一侧改过 → 保留改动侧
-/// - 双侧都在 → 本地优先；本地与 base 相同则取远端改动
-fn merge_named<T, K>(base: &[T], local: &[T], remote: &[T], key: K) -> Vec<T>
-where
-    K: Fn(&T) -> &str,
-    T: Clone + serde::Serialize,
-{
-    let val = |t: &T| serde_json::to_value(t).unwrap_or(Value::Null);
-    let mut out: Vec<T> = Vec::new();
-
-    let mut names: Vec<String> = Vec::new();
-    for e in base.iter().chain(local).chain(remote) {
-        let k = key(e).to_string();
-        if !names.contains(&k) {
-            names.push(k);
-        }
-    }
-
-    for k in names {
-        let b = base.iter().find(|e| key(e) == k);
-        let l = local.iter().find(|e| key(e) == k);
-        let r = remote.iter().find(|e| key(e) == k);
-        let picked = match (b, l, r) {
-            (None, None, None) => None,
-            // 新增（单侧或双侧）：并集保留，双侧冲突本地优先
-            (None, Some(l), None) | (None, None, Some(l)) => Some(l.clone()),
-            (None, Some(l), Some(_r)) => Some(l.clone()),
-            // 双侧都删 → 删除
-            (Some(_), None, None) => None,
-            // 本地删除：远端未改 → 跟随删除；远端改过（改名/换色）→ 保留远端
-            (Some(b), None, Some(r)) => {
-                if val(r) == val(b) {
-                    None
-                } else {
-                    Some(r.clone())
-                }
-            }
-            // 远端删除：本地未改 → 跟随删除；本地改过 → 保留本地
-            (Some(b), Some(l), None) => {
-                if val(l) == val(b) {
-                    None
-                } else {
-                    Some(l.clone())
-                }
-            }
-            // 双侧都在：本地优先；本地未改则接受远端改动
-            (Some(b), Some(l), Some(r)) => {
-                if val(l) == val(b) && val(r) != val(b) {
-                    Some(r.clone())
-                } else {
-                    Some(l.clone())
-                }
-            }
-        };
-        if let Some(e) = picked {
-            out.push(e);
-        }
-    }
-    out
+// 兼容旧测试入口：把内部 Snapshot 转成 wire 后调用 merge_wire。
+#[allow(dead_code)]
+pub fn merge(base: &Option<Snapshot>, local: &Snapshot, remote: Option<&Snapshot>) -> Snapshot {
+    let lw = WireSnapshot::from(local.clone());
+    let bw = base.as_ref().map(|s| WireSnapshot::from(s.clone()));
+    let rw = remote.map(|s| WireSnapshot::from(s.clone()));
+    merge_wire(bw.as_ref(), &lw, rw.as_ref()).into()
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Category, Task};
+    use crate::model::{WireCategory, WireTask};
 
-    fn cat(name: &str, color: &str) -> Category {
-        Category {
-            name: name.into(),
-            color: color.into(),
+    fn cat(name: &str, color: &str) -> WireCategory {
+        WireCategory { name: name.into(), color: color.into(), sort_order: 0, updated_at: 100, deleted_at: None }
+    }
+    fn task(uid: &str, cat: &str, title: &str, updated: i64) -> WireTask {
+        WireTask {
+            uid: uid.into(), parent_uid: None, title: title.into(), category: cat.into(),
+            priority: 0, done: false, completed_at: None, created_at: 1, updated_at: updated,
+            deleted_at: None, depth: 0, sort_order: 0,
+        }
+    }
+    fn snap(tasks: Vec<WireTask>, cats: Vec<WireCategory>) -> WireSnapshot {
+        WireSnapshot {
+            version: 2, revision: 1, exported_at: 200, device_id: "test".into(),
+            last_sync_at: None, categories: cats, tasks,
         }
     }
 
     #[test]
-    fn merge_local_cat_delete_propagates() {
-        // 本地删除分类（未改色），远端未动 → 合并后分类应被删除（不复活）
-        let base = Snapshot {
-            categories: vec![cat("工作", "#4A86D6"), cat("生活", "#4FBF9E")],
-            ..snap(vec![])
-        };
-        let local = Snapshot {
-            categories: vec![cat("生活", "#4FBF9E")],
-            ..snap(vec![])
-        };
-        let remote = Snapshot {
-            categories: vec![cat("工作", "#4A86D6"), cat("生活", "#4FBF9E")],
-            ..snap(vec![])
-        };
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert!(
-            !out.categories.iter().any(|c| c.name == "工作"),
-            "本地删除的分类不应在合并后复活"
-        );
-        assert!(out.categories.iter().any(|c| c.name == "生活"));
+    fn category_delete_does_not_revive_from_stale_peer() {
+        // 桌面删分类 → 墓碑；手机端旧快照仍含活分类 → 合并后墓碑胜，不复活。
+        let mut deleted = cat("工作", "#5AA9E6");
+        deleted.deleted_at = Some(300);
+        deleted.updated_at = 300;
+        let base = snap(vec![], vec![cat("工作", "#5AA9E6")]);
+        let local = snap(vec![], vec![deleted]);
+        let remote = base_snap_with_cat();
+        let out = merge_wire(Some(&base), &local, Some(&remote));
+        let c = out.categories.iter().find(|c| c.name == "工作").unwrap();
+        assert!(c.deleted_at.is_some(), "桌面已删除的分类不应被手机端旧快照复活");
+    }
+
+    fn base_snap_with_cat() -> WireSnapshot {
+        snap(vec![], vec![cat("工作", "#5AA9E6")])
     }
 
     #[test]
-    fn merge_remote_cat_delete_propagates() {
-        // 远端删除分类，本地未动 → 跟随删除
-        let base = Snapshot {
-            categories: vec![cat("工作", "#4A86D6"), cat("学习", "#EF9F27")],
-            ..snap(vec![])
-        };
-        let local = Snapshot {
-            categories: vec![cat("工作", "#4A86D6"), cat("学习", "#EF9F27")],
-            ..snap(vec![])
-        };
-        let remote = Snapshot {
-            categories: vec![cat("工作", "#4A86D6")],
-            ..snap(vec![])
-        };
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert!(!out.categories.iter().any(|c| c.name == "学习"));
+    fn category_real_edit_after_delete_revives() {
+        // 删除后对方真改了颜色（内容相对 base 变化）→ 编辑胜，分类恢复。
+        let mut deleted = cat("工作", "#5AA9E6");
+        deleted.deleted_at = Some(300);
+        deleted.updated_at = 300;
+        let base = snap(vec![], vec![cat("工作", "#5AA9E6")]);
+        let local = snap(vec![], vec![deleted]);
+        let mut remote = snap(vec![], vec![cat("工作", "#A78BFA")]);
+        remote.categories[0].updated_at = 400; // 删除后真编辑
+        let out = merge_wire(Some(&base), &local, Some(&remote));
+        let c = out.categories.iter().find(|c| c.name == "工作").unwrap();
+        assert!(c.deleted_at.is_none(), "删除后真编辑过应恢复分类");
+        assert_eq!(c.color, "#A78BFA");
     }
 
     #[test]
-    fn merge_remote_cat_edited_keeps_remote_edit() {
-        // 本地删除、远端改色 → 保留远端改动（不同设备仍需要这个分类）
-        let base = Snapshot {
-            categories: vec![cat("工作", "#4A86D6")],
-            ..snap(vec![])
-        };
-        let local = Snapshot {
-            categories: vec![],
-            ..snap(vec![])
-        };
-        let remote = Snapshot {
-            categories: vec![cat("工作", "#DE5B55")],
-            ..snap(vec![])
-        };
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.categories.len(), 1);
-        assert_eq!(out.categories[0].color, "#DE5B55");
+    fn task_field_level_merge() {
+        // 本地改标题、远端改优先级 → 字段级合并两者都保留。
+        let base = snap(vec![task("a", "工作", "原文", 1)], vec![]);
+        let local = snap(vec![task("a", "工作", "本地标题", 10)], vec![]);
+        let mut remote = snap(vec![task("a", "工作", "原文", 20)], vec![]);
+        remote.tasks[0].priority = 4;
+        let out = merge_wire(Some(&base), &local, Some(&remote));
+        let t = out.tasks.iter().find(|t| t.uid == "a").unwrap();
+        assert_eq!(t.title, "本地标题");
+        assert_eq!(t.priority, 4);
     }
 
     #[test]
-    fn merge_new_cat_union() {
-        // 双侧各新增分类 → 并集
-        let base = Snapshot {
-            categories: vec![],
-            ..snap(vec![])
-        };
-        let local = Snapshot {
-            categories: vec![cat("运动", "#3AA6C9")],
-            ..snap(vec![])
-        };
-        let remote = Snapshot {
-            categories: vec![cat("阅读", "#7F77DD")],
-            ..snap(vec![])
-        };
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.categories.len(), 2);
-    }
-
-    fn task(id: &str, cat: &str, title: &str, updated: i64) -> Task {
-        Task {
-            id: id.into(),
-            title: title.into(),
-            category: cat.into(),
-            priority: 0,
-            done: false,
-            created_at: 0,
-            updated_at: updated,
-            completed_at: None,
-            subs: vec![],
-        }
-    }
-
-    fn snap(tasks: Vec<Task>) -> Snapshot {
-        Snapshot {
-            version: 2,
-            revision: 0,
-            device_id: "test".into(),
-            categories: vec![],
-            tasks,
-        }
+    fn task_tombstone_wins_unless_edited_after() {
+        let base = snap(vec![task("a", "工作", "原文", 1)], vec![]);
+        let mut local = snap(vec![], vec![]); // 本地删除 a
+        let _ = &mut local;
+        let mut local_t = snap(vec![task("a", "工作", "原文", 1)], vec![]);
+        local_t.tasks[0].deleted_at = Some(300);
+        local_t.tasks[0].updated_at = 300;
+        let remote = snap(vec![task("a", "工作", "原文", 1)], vec![]); // 远端未动
+        let out = merge_wire(Some(&base), &local_t, Some(&remote));
+        let t = out.tasks.iter().find(|t| t.uid == "a").unwrap();
+        assert!(t.deleted_at.is_some(), "删除后对方未编辑，墓碑应生效");
     }
 
     #[test]
-    fn merge_unchanged_both_sides() {
-        let base = snap(vec![task("a", "工作", "原文", 1)]);
-        let local = snap(vec![task("a", "工作", "原文", 1)]);
-        let remote = snap(vec![task("a", "工作", "原文", 1)]);
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.tasks.len(), 1);
-        assert_eq!(out.tasks[0].title, "原文");
+    fn stale_remote_short_circuits() {
+        let local = WireSnapshot { revision: 10, exported_at: 500, ..snap(vec![task("a","工作","本地",10)], vec![]) };
+        let remote = WireSnapshot { revision: 5, exported_at: 100, ..snap(vec![task("a","工作","旧",5)], vec![]) };
+        assert!(is_stale_remote(&remote, &local));
+        let out = merge_wire(None, &local, Some(&remote));
+        assert_eq!(out.tasks[0].title, "本地", "陈旧远端不应覆盖本地");
     }
 
     #[test]
-    fn merge_local_wins_when_remote_older() {
-        let base = snap(vec![task("a", "工作", "原文", 1)]);
-        let local = snap(vec![task("a", "工作", "本地改", 10)]);
-        let remote = snap(vec![task("a", "工作", "远端改", 5)]);
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.tasks[0].title, "本地改");
-    }
-
-    #[test]
-    fn merge_remote_wins_when_newer() {
-        let base = snap(vec![task("a", "工作", "原文", 1)]);
-        let local = snap(vec![task("a", "工作", "本地改", 3)]);
-        let remote = snap(vec![task("a", "工作", "远端改", 9)]);
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.tasks[0].title, "远端改");
-    }
-
-    #[test]
-    fn merge_remote_delete_local_untouched() {
-        let base = snap(vec![task("a", "工作", "原文", 1)]);
-        let local = snap(vec![]); // 本地没动（a 不在）
-        let remote = snap(vec![]); // 远端删除了 a
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert!(out.tasks.is_empty());
-    }
-
-    #[test]
-    fn merge_keep_local_when_remote_deleted_but_local_edited() {
-        let base = snap(vec![task("a", "工作", "原文", 1)]);
-        let local = snap(vec![task("a", "工作", "本地改", 10)]);
-        let remote = snap(vec![]);
-        let out = merge(&Some(base), &local, Some(&remote));
-        assert_eq!(out.tasks.len(), 1);
-        assert_eq!(out.tasks[0].title, "本地改");
-    }
-
-    #[test]
-    fn merge_union_of_new_tasks() {
-        let base = snap(vec![]);
-        let local = snap(vec![task("a", "工作", "本地新增", 2)]);
-        let remote = snap(vec![task("b", "生活", "远端新增", 3)]);
-        let out = merge(&Some(base), &local, Some(&remote));
-        let ids: Vec<&str> = out.tasks.iter().map(|t| t.id.as_str()).collect();
+    fn union_of_new_tasks() {
+        let base = snap(vec![], vec![]);
+        let local = snap(vec![task("a", "工作", "本地新增", 2)], vec![]);
+        let remote = snap(vec![task("b", "生活", "远端新增", 3)], vec![]);
+        let out = merge_wire(Some(&base), &local, Some(&remote));
+        let ids: Vec<&str> = out.tasks.iter().map(|t| t.uid.as_str()).collect();
         assert!(ids.contains(&"a") && ids.contains(&"b"));
-    }
-
-    #[test]
-    fn merge_pair_no_base() {
-        let a = snap(vec![task("a", "工作", "旧", 1)]);
-        let b = snap(vec![task("a", "工作", "新", 5), task("c", "学习", "新任务", 2)]);
-        let out = merge_pair(&a, &b);
-        assert_eq!(out.tasks.len(), 2);
-        assert_eq!(out.tasks.iter().find(|t| t.id == "a").unwrap().title, "新");
     }
 }
