@@ -7,7 +7,7 @@ mod sync;
 mod theme;
 mod ui;
 
-use app::{App, HeatScope, InputMode, Page, SyncStatus};
+use app::{App, InputMode, Page, SyncStatus};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
@@ -122,7 +122,7 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
         // 统计页：第 2 行点击周期胶囊切换周期；热力图格子点击看该日完成数
         Page::Stats => {
             if row == 2 {
-                for (scope, x0, w) in ui::stats::period_tab_hits(app) {
+                for (scope, x0, w) in ui::stats::period_tab_hits() {
                     if col >= x0 && col < x0 + w {
                         app.heat = scope;
                         return;
@@ -738,13 +738,14 @@ mod key_tests {
 
     #[test]
     fn mouse_click_period_tabs_switches_scope() {
+        use crate::app::HeatScope;
         unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mper") };
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-mper");
         let store = Store::new();
         let mut app = App::new(&store);
         app.page = Page::Stats;
         app.heat = HeatScope::Week;
-        let hits = ui::stats::period_tab_hits(&app);
+        let hits = ui::stats::period_tab_hits();
         let (year_scope, x0, w) = *hits
             .iter()
             .find(|(s, _, _)| *s == HeatScope::Year)

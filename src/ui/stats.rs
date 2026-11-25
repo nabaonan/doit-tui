@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::model::completed_on;
+use crate::model::{completed_on, Task};
 use crate::theme::{hex_color, Theme};
 
 use chrono::Datelike;
@@ -159,7 +159,7 @@ fn draw_period_tabs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 /// 周期切换胶囊（近一周/近一月/近一年）的可点击列区间，与 draw_period_tabs 同源计算。
 /// 统计页第 0 行（全局第 2 行）。
-pub fn period_tab_hits(app: &App) -> Vec<(crate::app::HeatScope, u16, u16)> {
+pub fn period_tab_hits() -> Vec<(crate::app::HeatScope, u16, u16)> {
     use crate::app::HeatScope;
     let scopes: [(HeatScope, &str); 3] = [
         (HeatScope::Week, "近一周"),
@@ -461,6 +461,22 @@ fn draw_heatmap(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     ), inner);
 }
 
+/// 统计某个现存分类在「未删除任务集合」里的：区间完成数 + 未完成数。
+fn count_cat(
+    acts: &[&Task],
+    c: &crate::model::Category,
+    is_in_period: &impl Fn(i64) -> bool,
+) -> (String, Color, usize, usize) {
+    let n = acts
+        .iter()
+        .filter(|t| {
+            t.category == c.name && t.completed_at.map(is_in_period).unwrap_or(false)
+        })
+        .count();
+    let pending = acts.iter().filter(|t| t.category == c.name && !t.done).count();
+    (c.name.clone(), hex_color(&c.color), n, pending)
+}
+
 /// 分类占比（区间内完成的任务）：随顶部周期切换联动。
 fn draw_donut(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::bordered()
@@ -481,35 +497,22 @@ fn draw_donut(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let start = period_start(app, today);
     let is_in_period = |ts: i64| ts > 0 && completed_on(ts) >= start;
 
-    // 图例：只展示「当前仍存在」且「有内容（区间有完成或有未完成）」的分类；
-    // 已删除分类不在 categories 列表、空壳分类（无完成也无待办）一并隐藏；
-    // 「默认」仅在确有区间完成但无法归属到现存分类时出现。
+    // 图例：只统计「未删除的任务」on「当前仍存在的分类」；空壳分类（无完成亦无待办）隐藏。
+    // 已删除任务的墓碑不计入、已删除分类不在列表天然不展示；
+    // 「默认」仅在确有区间完成但无法归属到现存分类时才出现。
     let colors: Vec<(String, Color, usize)> = {
+        let acts: Vec<&Task> = app.snap.active_tasks().collect();
         let mut v: Vec<(String, Color, usize, usize)> = app
             .snap
             .categories
             .iter()
-            .map(|c| {
-                let n = app
-                    .snap
-                    .tasks
-                    .iter()
-                    .filter(|t| {
-                        t.category == c.name
-                            && t.completed_at.map(is_in_period).unwrap_or(false)
-                    })
-                    .count();
-                let pending = app.snap.tasks.iter().filter(|t| t.category == c.name && !t.done).count();
-                (c.name.clone(), hex_color(&c.color), n, pending)
-            })
+            .map(|c| count_cat(&acts, c, &is_in_period))
             .collect();
         v.retain(|(_, _, n, p)| *n > 0 || *p > 0);
         let mut out: Vec<(String, Color, usize)> =
             v.into_iter().map(|(n, c, cnt, _)| (n, c, cnt)).collect();
         let known: usize = out.iter().map(|(_, _, n)| *n).sum();
-        let rest = app
-            .snap
-            .tasks
+        let rest = acts
             .iter()
             .filter(|t| t.completed_at.map(is_in_period).unwrap_or(false))
             .count()

@@ -4,14 +4,9 @@ version = "0.1.2"
 edition = "2024"
 description = "doit 待办应用终端版（ratatui）"
 
-# 终端快捷启动指令：`doit`（主命令，与三端命名统一）；
-# 同时保留 `doit-tui` 便于既有习惯 / 兼容，两个产物同源。
+# 终端快捷启动指令：`doit`（主命令，与三端命名统一）。
 [[bin]]
 name = "doit"
-path = "src/main.rs"
-
-[[bin]]
-name = "doit-tui"
 path = "src/main.rs"
 
 [dependencies]
