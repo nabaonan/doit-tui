@@ -59,7 +59,8 @@ fn run(
     Ok(())
 }
 
-/// 鼠标左键点击：顶栏第 0 行切页面 tab；分类条第 1 行切分类 / 添加分类。
+/// 鼠标左键点击（仅松开瞬间 Up 触发，避免 Down/Up 双击导致折叠来回切换）：
+/// 顶栏第 0 行切页面 tab；分类条第 1 行切分类 / 添加分类；内容区按页面分派。
 /// 有弹层打开时忽略点击，避免输入中误切页面。
 fn on_mouse(m: MouseEvent, app: &mut App) {
     use crossterm::event::{MouseButton, MouseEventKind};
@@ -70,10 +71,7 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
     {
         return;
     }
-    if !matches!(
-        m.kind,
-        MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Down(MouseButton::Left)
-    ) {
+    if m.kind != MouseEventKind::Up(MouseButton::Left) {
         return;
     }
     let (row, col) = (m.row, m.column);
