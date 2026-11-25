@@ -294,7 +294,7 @@ pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
             let cell_w = usable / weeks;
             if cell_w >= 2 {
                 // 大格模式：色块 1 列 + 间隔，单元宽 cell_w
-                let wk = ((col - text_x) as usize / cell_w);
+                let wk = (col - text_x) as usize / cell_w;
                 if wk >= weeks {
                     return None;
                 }
