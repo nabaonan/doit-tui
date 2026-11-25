@@ -288,11 +288,13 @@ pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
             }
             let (start, end, weeks) = year_weeks(today);
             let jan1 = chrono::NaiveDate::from_ymd_opt(y, 1, 1)?;
-            // 与渲染同口径：全宽大格(2列/周)，放不下才退化窄格(1列/周)
+            // 与渲染同口径：放大单元宽 = 可用列 / 周数；≥2 时大格、否则窄格
             let inner_w = heat_w.saturating_sub(2);
-            if inner_w.saturating_sub(4) as usize / 2 >= weeks {
-                // 大格模式：每格 2 列
-                let wk = ((col - text_x) / 2) as usize;
+            let usable = inner_w.saturating_sub(4) as usize;
+            let cell_w = usable / weeks;
+            if cell_w >= 2 {
+                // 大格模式：色块 1 列 + 间隔，单元宽 cell_w
+                let wk = ((col - text_x) as usize / cell_w);
                 if wk >= weeks {
                     return None;
                 }
@@ -303,7 +305,6 @@ pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
                 Some(d)
             } else {
                 // 窄格模式：每格 1 列，裁掉最早的周
-                let usable = inner_w.saturating_sub(4) as usize;
                 let start_wk = weeks.saturating_sub(usable).min(weeks);
                 let drawn = (col - text_x) as usize;
                 if drawn >= usable {
@@ -420,31 +421,38 @@ fn draw_heatmap(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             let (start, end, weeks) = year_weeks(today);
             let jan1 = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
 
-            // 近一年热力图：全屏宽度，53 周 × 2 列用大格 `▄ `（横纵等距）。
-            // 只有终端极窄放不下时（占 2 列/周），才退化为 1 列小格 `▪`。
-            let usable2 = inner.width.saturating_sub(4) as usize / 2;
-            let wide = usable2 >= weeks;
-            let (start_wk, sym) = if wide {
-                (0usize, "▄ ")
-            } else {
-                let u1 = inner.width.saturating_sub(4) as usize;
-                (weeks.saturating_sub(u1).min(weeks), "▪")
-            };
-            for dow in 0..7usize {
-                let mut spans = Vec::new();
-                for wk in start_wk..weeks {
-                    let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
-                    if d < jan1 || d > end {
-                        if wide {
-                            spans.push(Span::raw("  "));
+            // 近一年热力图：全屏宽度。按可用列数把 53 周均分放大单元格宽
+            // （色块 + 等宽间隔铺满整行），窄终端放不下 2 列/周时退化为 1 列小格。
+            let usable = inner.width.saturating_sub(4) as usize;
+            let cell_w = usable / weeks; // 每周占列数（≥2 时用大格）
+            if cell_w >= 2 {
+                for dow in 0..7usize {
+                    let mut spans = Vec::new();
+                    for wk in 0..weeks {
+                        let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
+                        if d < jan1 || d > end {
+                            spans.push(Span::raw(" ".repeat(cell_w)));
                         } else {
-                            spans.push(Span::raw(" "));
+                            spans.push(cell(d, "▄"));
+                            spans.push(Span::raw(" ".repeat(cell_w - 1)));
                         }
-                    } else {
-                        spans.push(cell(d, sym));
                     }
+                    rows.push(Line::from(spans));
                 }
-                rows.push(Line::from(spans));
+            } else {
+                let start_wk = weeks.saturating_sub(usable).min(weeks);
+                for dow in 0..7usize {
+                    let mut spans = Vec::new();
+                    for wk in start_wk..weeks {
+                        let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
+                        if d < jan1 || d > end {
+                            spans.push(Span::raw(" "));
+                        } else {
+                            spans.push(cell(d, "▪"));
+                        }
+                    }
+                    rows.push(Line::from(spans));
+                }
             }
         }
     }

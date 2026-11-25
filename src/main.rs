@@ -762,6 +762,28 @@ mod key_tests {
     }
 
     #[test]
+    fn heat_year_wide_hit_consistent() {
+        use chrono::Duration;
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-hyear") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-hyear");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.area = ratatui::layout::Rect::new(0, 0, 200, 34); // 宽屏
+        app.page = Page::Stats;
+        app.heat = crate::app::HeatScope::Year;
+        // 宽屏单元宽 cell_w = (200-2-4)/53 = 3；文本起点 3
+        let cell_w = (200u32 - 2 - 4) as usize / 53;
+        assert_eq!(cell_w, 3);
+        let text_x = 3u16;
+        // dow0 行 = inner_top(5)+pad(1)=6
+        let d_a = ui::stats::heat_day_at(&app, 6, text_x + (30 * cell_w) as u16).unwrap();
+        let d_b = ui::stats::heat_day_at(&app, 6, text_x + (31 * cell_w) as u16).unwrap();
+        assert_eq!(d_b - d_a, Duration::days(7), "横向每单元应跨 7 天");
+        let d_c = ui::stats::heat_day_at(&app, 7, text_x + (30 * cell_w) as u16).unwrap();
+        assert_eq!(d_c - d_a, Duration::days(1), "纵向下移一行应 +1 天");
+    }
+
+    #[test]
     fn nested_subtasks_unlimited() {
         let _ = std::fs::remove_dir_all("/tmp/doit-tui-nest-test");
         let store = Store::with_dir("/tmp/doit-tui-nest-test");
