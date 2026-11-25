@@ -142,6 +142,7 @@ pub struct App {
     pub page: Page,
     pub cal_month: (i32, u32), // 月历页查看的年月
     pub cal_sel: chrono::NaiveDate, // 月历页选中的日期
+    pub area: ratatui::layout::Rect, // 最近一次渲染的终端屏幕区域（鼠标命中用）
     pub cat: String,           // 当前分类过滤（"全部" 或分类名）
     pub sel: Option<String>,   // 选中的任务/子任务 id
     pub expanded: Vec<String>, // 已展开的父任务 id
@@ -181,6 +182,7 @@ impl App {
             page: Page::Today,
             cal_month: (today.year(), today.month()),
             cal_sel: today.date_naive(),
+            area: ratatui::layout::Rect::new(0, 0, 100, 34),
             cat: "全部".into(),
             sel: None,
             expanded,
@@ -255,7 +257,7 @@ impl App {
         rows
     }
 
-    fn ensure_selection(&mut self) {
+    pub(crate) fn ensure_selection(&mut self) {
         let ids = self.visible_ids();
         if ids.is_empty() {
             self.sel = None;
@@ -388,6 +390,20 @@ impl App {
             }
             self.ensure_selection();
         }
+    }
+
+    /// 任意节点（顶级任务或任意深度子任务）是否带有子节点。
+    pub fn node_has_children(&self, id: &str) -> bool {
+        use crate::model::find_sub;
+        for t in &self.snap.tasks {
+            if t.id == id {
+                return !t.subs.is_empty();
+            }
+            if let Some(s) = find_sub(&t.subs, id) {
+                return !s.subs.is_empty();
+            }
+        }
+        false
     }
 
     pub fn toggle_fold(&mut self, fold: bool) {

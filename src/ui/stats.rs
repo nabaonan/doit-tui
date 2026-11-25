@@ -161,7 +161,110 @@ fn completion_by_day(app: &App) -> BTreeMap<chrono::NaiveDate, u32> {
     map
 }
 
-/// GitHub 风格热力图：本周 / 本月 / 本年（统计页 ←/→ 或 h/l 切换）。
+/// 某日完成数（与热力图 completion_by_day 同口径，含任意层级子任务）。
+pub fn day_completed(app: &App, d: chrono::NaiveDate) -> u32 {
+    completion_by_day(app).get(&d).copied().unwrap_or(0)
+}
+
+/// 鼠标点击热力图格子 → 对应日期（三种周期各自与渲染同布局计算，列/行均为终端全局坐标）。
+/// 命中「亮色点」（有完成的格子）时返回该日期，其余返回 None。
+pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
+    use crate::app::HeatScope;
+    use chrono::Datelike;
+
+    let area_w = app.area.width;
+    let heat_w = (area_w as u32 * 56 / 100) as u16; // 热力图占 56% 卡片
+    if col >= heat_w {
+        return None;
+    }
+    // 内容区顶 2（顶栏+分类条）+ tabs(1) + range(1) + 卡片块内顶层 => 卡片 inner 顶
+    let inner_top = 2 + 1 + 1 + 1; // 5
+    let inner_h = 10u16;
+    if row < inner_top {
+        return None;
+    }
+    if row >= inner_top + inner_h {
+        return None;
+    }
+    // 块左 border(1) + padding(2) → 文本起点
+    let text_x = 3u16;
+
+    let today = chrono::Local::now().date_naive();
+    let (y, _m) = (today.year(), today.month());
+    match app.heat {
+        HeatScope::Week => {
+            let pad = (inner_h - 2) / 2;
+            if row != inner_top + pad {
+                return None;
+            }
+            if col < text_x {
+                return None;
+            }
+            let c = (col - text_x) / 2;
+            if c > 6 {
+                return None;
+            }
+            let mon = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+            Some(mon + chrono::Duration::days(c as i64))
+        }
+        HeatScope::Month => {
+            let first = chrono::NaiveDate::from_ymd_opt(y, _m, 1)?;
+            let (ny, nm) = if _m == 12 { (y + 1, 1) } else { (y, _m + 1) };
+            let dim = (chrono::NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?).day() as usize;
+            let off = first.weekday().num_days_from_monday() as usize;
+            let n_rows = (off + dim + 6) / 7;
+            let pad = (inner_h.saturating_sub(n_rows as u16)) / 2;
+            let base_row = inner_top + pad;
+            if row < base_row {
+                return None;
+            }
+            let r = (row - base_row) as usize;
+            if r >= n_rows || col < text_x + 2 {
+                return None;
+            }
+            let c = ((col - text_x - 2) / 2) as usize;
+            if c > 6 {
+                return None;
+            }
+            let idx = r * 7 + c;
+            if idx < off || idx >= off + dim {
+                return None;
+            }
+            Some(first + chrono::Duration::days((idx - off) as i64))
+        }
+        HeatScope::Year => {
+            let pad = (inner_h - 7) / 2;
+            if row < inner_top + pad {
+                return None;
+            }
+            let dow = (row - (inner_top + pad)) as usize;
+            if dow > 6 || col < text_x {
+                return None;
+            }
+            let (start, end, weeks) = year_weeks(today);
+            let jan1 = chrono::NaiveDate::from_ymd_opt(y, 1, 1)?;
+            // 与渲染同口径：inner 宽 = 卡片内宽 - 2 边框 → usable = 再 - 4 padding
+            let inner_w = heat_w.saturating_sub(2);
+            let usable = inner_w.saturating_sub(4) as usize;
+            let start_wk = if usable >= weeks { 0 } else { weeks - usable };
+            let drawn = (col - text_x) as usize;
+            if drawn >= usable {
+                return None;
+            }
+            let wk = start_wk + drawn;
+            if wk >= weeks {
+                return None;
+            }
+            let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
+            if d < jan1 || d > end {
+                return None;
+            }
+            Some(d)
+        }
+    }
+}
+
+
 /// 方格统一用半高块 `▄ `：实心 1 字符见方 + 1 空格空隙，横纵间距物理相等；
 /// 本年 53 周占 2 列/周，宽度不足时自动裁掉最早的周。
 fn draw_heatmap(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -309,9 +412,11 @@ fn draw_donut(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let start = period_start(app, today);
     let is_in_period = |ts: i64| ts > 0 && completed_on(ts) >= start;
 
-    // 图例展示所有分类（含 0 完成的）；环形只画 >0 的段
+    // 图例：只展示「当前仍存在」且「有内容（区间有完成或有未完成）」的分类；
+    // 已删除分类不在 categories 列表、空壳分类（无完成也无待办）一并隐藏；
+    // 「默认」仅在确有区间完成但无法归属到现存分类时出现。
     let colors: Vec<(String, Color, usize)> = {
-        let mut v: Vec<(String, Color, usize)> = app
+        let mut v: Vec<(String, Color, usize, usize)> = app
             .snap
             .categories
             .iter()
@@ -325,10 +430,14 @@ fn draw_donut(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                             && t.completed_at.map(is_in_period).unwrap_or(false)
                     })
                     .count();
-                (c.name.clone(), hex_color(&c.color), n)
+                let pending = app.snap.tasks.iter().filter(|t| t.category == c.name && !t.done).count();
+                (c.name.clone(), hex_color(&c.color), n, pending)
             })
             .collect();
-        let known: usize = v.iter().map(|(_, _, n)| *n).sum();
+        v.retain(|(_, _, n, p)| *n > 0 || *p > 0);
+        let mut out: Vec<(String, Color, usize)> =
+            v.into_iter().map(|(n, c, cnt, _)| (n, c, cnt)).collect();
+        let known: usize = out.iter().map(|(_, _, n)| *n).sum();
         let rest = app
             .snap
             .tasks
@@ -337,9 +446,9 @@ fn draw_donut(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .count()
             .saturating_sub(known);
         if rest > 0 {
-            v.push(("默认".into(), theme.faint, rest));
+            out.push(("默认".into(), theme.faint, rest));
         }
-        v
+        out
     };
     let total: usize = colors.iter().map(|(_, _, n)| *n).sum();
 

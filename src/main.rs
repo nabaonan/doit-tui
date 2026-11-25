@@ -37,6 +37,13 @@ fn run(
 ) -> anyhow::Result<()> {
     while !app.quit {
         app.expire_toast();
+        let sz = terminal.size()?;
+        app.area = ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: sz.width,
+            height: sz.height,
+        };
         terminal.draw(|f| draw(f, app))?;
 
         if crossterm::event::poll(std::time::Duration::from_millis(200))? {
@@ -78,7 +85,9 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
                 return;
             }
         }
-    } else if row == 1 {
+        return;
+    }
+    if row == 1 {
         // 分类导航条（含"添加分类"）
         for (target, x0, w) in ui::catbar_hits(app) {
             if col >= x0 && col < x0 + w {
@@ -89,6 +98,44 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
                 return;
             }
         }
+        return;
+    }
+    // 内容区（第 2 行起）按页面分派
+    match app.page {
+        // 今日页：点击任务卡片 → 选中；父级任务再切换展开/收起
+        Page::Today => {
+            if let Some((id, _depth)) = ui::today::row_at(app, row) {
+                app.sel = Some(id.clone());
+                if app.node_has_children(&id) {
+                    let expand = !app.expanded.iter().any(|e| e == &id);
+                    app.toggle_fold(!expand); // fold=true 收起 / fold=false 展开
+                    app.ensure_selection();
+                }
+            }
+        }
+        // 月历页：点击日期 → 选中该天（下方任务面板联动）
+        Page::Calendar => {
+            if let Some(d) = ui::calendar::day_at(app, row, col) {
+                app.cal_sel = d;
+                use chrono::Datelike;
+                app.cal_month = (d.year(), d.month());
+            }
+        }
+        // 统计页：点击热力图格子 → 该日完成数 toast（"亮色的点"）
+        Page::Stats => {
+            if let Some(d) = ui::stats::heat_day_at(app, row, col) {
+                let n = ui::stats::day_completed(app, d);
+                use chrono::Datelike;
+                app.toast(format!(
+                    "{}月{}日：完成 {} 个任务{}",
+                    d.month(),
+                    d.day(),
+                    n,
+                    if n == 0 { "（无）" } else { "" }
+                ));
+            }
+        }
+        Page::Settings => {}
     }
 }
 
@@ -568,6 +615,118 @@ mod key_tests {
             .unwrap();
         on_mouse(mk(x0 + 1, 0), &mut app);
         assert!(app.cat_modal.is_some(), "弹层打开时点击不应切页");
+    }
+
+    #[test]
+    fn mouse_click_calendar_selects_day() {
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mcal") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-mcal");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Calendar;
+        use chrono::Datelike;
+        let first = chrono::NaiveDate::from_ymd_opt(app.cal_month.0, app.cal_month.1, 1).unwrap();
+        let off = first.weekday().num_days_from_monday() as u16;
+        let mk = |col: u16, row: u16| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // 点击 1 号所在的网格（第 4 行，第 off 列）
+        on_mouse(mk(4 + off * 5, 4), &mut app);
+        assert_eq!(app.cal_sel, first, "点击日期应选中该天");
+        // 点击无效区域（内容区空白）不改选中
+        let before = app.cal_sel;
+        on_mouse(mk(99, 20), &mut app);
+        assert_eq!(app.cal_sel, before);
+    }
+
+    #[test]
+    fn mouse_click_today_folds_parent() {
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mtody") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-mtody");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Today;
+        let t1 = app.snap.tasks[0].id.clone();
+        assert!(app.expanded.iter().any(|e| e == &t1), "预置：t1 默认展开");
+        let mk = |col: u16, row: u16| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // 内容区第 1 个卡片 = 第 2 行 → t1；第一次点击收起
+        on_mouse(mk(10, 2), &mut app);
+        assert!(!app.expanded.iter().any(|e| e == &t1), "点击父级应收起子任务");
+        assert_eq!(app.sel.as_deref(), Some(t1.as_str()));
+        // 再次点击展开
+        on_mouse(mk(10, 2), &mut app);
+        assert!(app.expanded.iter().any(|e| e == &t1), "再次点击应展开子任务");
+        // 点击无子任务的叶子（子任务行）只选中不折叠
+        if let Some(sub) = app.snap.tasks[0].subs.first().map(|s| s.id.clone()) {
+            let idx = app.visible_ids().iter().position(|(id, _)| id == &sub).unwrap();
+            on_mouse(mk(10, 2 + idx as u16 * 4), &mut app);
+            assert_eq!(app.sel.as_deref(), Some(sub.as_str()));
+        }
+    }
+
+    #[test]
+    fn mouse_click_heatmap_week_cell() {
+        use chrono::Datelike;
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mheat") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-mheat");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Stats;
+        app.heat = crate::app::HeatScope::Week;
+        // 卡片 inner 顶=5，(10-2)/2=4 → 方格行=9；文本起点 3，格宽 2
+        let d = ui::stats::heat_day_at(&app, 9, 3).expect("第 0 个方格应命中");
+        let today = chrono::Local::now().date_naive();
+        let mon = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+        assert_eq!(d, mon);
+        // 命中方格 → on_mouse 弹出 toast（完成数）
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 9,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        on_mouse(ev, &mut app);
+        assert!(app.toast.is_some(), "点击热力图应有完成数提示");
+    }
+
+    #[test]
+    fn donut_hides_empty_category() {
+        use ratatui::backend::TestBackend;
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-dnut") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-dnut");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Stats;
+        // 追加一个没有任何任务的新分类（空壳：无完成亦无待办）
+        app.snap.categories.push(crate::model::Category {
+            name: "空壳分类".into(),
+            color: "#123456".into(),
+            sort_order: 0,
+            updated_at: 0,
+            deleted_at: None,
+        });
+        let backend = TestBackend::new(100, 34);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let b = terminal.backend();
+        let mut text = String::new();
+        for y in 0..34 {
+            for x in 0..100 {
+                text.push(b.buffer()[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        assert!(!text.contains("空壳分类"), "空壳分类不应出现在分类占比图例");
+        // CJK 宽字符在 buffer 中各占一个占位空单元，需去空白后再比对
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("工作"), "有内容的分类应保留在图例");
     }
 
     #[test]

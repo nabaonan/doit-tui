@@ -24,6 +24,43 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_day_panel(f, app, rows[1], theme);
 }
 
+/// 鼠标点击月历网格 → 日期（与 draw_grid 同布局：内容区第 2 行开始，块上边框 1 行，表头 1 行；
+/// 每格 5 列宽，padding 3；每格占 2 行：日期行 + 圆点行）。
+pub fn day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let (year, month) = app.cal_month;
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let dim = (chrono::NaiveDate::from_ymd_opt(ny, nm, 1)?.pred_opt()?).day() as i32;
+    let off = first.weekday().num_days_from_monday() as usize;
+
+    // 布局：内容区顶(2) + 网格块上边框(1) = inner 顶(3)；表头 1 行(3)；日期从 4 起
+    if row < 4 {
+        return None;
+    }
+    let rel = row - 4;
+    if rel > 11 {
+        return None; // 最多 6 周 × 2 行
+    }
+    let week = rel / 2;
+    if col < 4 {
+        return None; // 块左 border(1) + padding(3)
+    }
+    let wd = (col - 4) / 5;
+    if wd > 6 {
+        return None;
+    }
+    let idx = week as usize * 7 + wd as usize;
+    if idx < off {
+        return None;
+    }
+    let day = idx - off + 1;
+    if day as i32 > dim {
+        return None;
+    }
+    Some(first + chrono::Duration::days((day - 1) as i64))
+}
+
 fn draw_grid(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let (year, month) = app.cal_month;
     let block = Block::bordered()

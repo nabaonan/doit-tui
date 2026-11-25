@@ -17,21 +17,10 @@ pub const SUB_INDENT: u16 = 4;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let rows = app.visible_ids();
-    let mut scroll = app.list_scroll as usize;
     let n_rows = rows.len();
+    let scroll = view_scroll(app, area);
     let slot = CARD_H + CARD_GAP;
     let max_visible = (area.height / slot) as usize;
-
-    // 让选中卡片保持可见
-    if let Some(sel_idx) = rows.iter().position(|(id, _)| Some(id) == app.sel.as_ref()) {
-        if sel_idx < scroll {
-            scroll = sel_idx;
-        }
-        if sel_idx >= scroll + max_visible && max_visible > 0 {
-            scroll = sel_idx + 1 - max_visible;
-        }
-    }
-    scroll = scroll.min(n_rows.saturating_sub(max_visible));
 
     let mut y = area.y;
     let bottom = area.y + area.height;
@@ -217,6 +206,49 @@ fn draw_card(f: &mut Frame, app: &App, id: &str, depth: u8, area: Rect, theme: &
     spans.extend(meta);
 
     f.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+/// 今日页内容区（顶栏1 + 分类条1 → 内容从第 2 行起；去掉底部键位栏 1 行）。
+fn content_rect(app: &App) -> Rect {
+    Rect {
+        x: 0,
+        y: 2,
+        width: app.area.width,
+        height: app.area.height.saturating_sub(3),
+    }
+}
+
+/// 列表滚动位置（与 draw 共用同一套「让选中项可见」的计算，保证渲染与鼠标命中一致）。
+pub fn view_scroll(app: &App, area: Rect) -> usize {
+    let rows = app.visible_ids();
+    let n_rows = rows.len();
+    let slot = CARD_H + CARD_GAP;
+    let max_visible = (area.height / slot) as usize;
+    let mut scroll = app.list_scroll as usize;
+    if let Some(sel_idx) = rows.iter().position(|(id, _)| Some(id) == app.sel.as_ref()) {
+        if sel_idx < scroll {
+            scroll = sel_idx;
+        }
+        if sel_idx >= scroll + max_visible && max_visible > 0 {
+            scroll = sel_idx + 1 - max_visible;
+        }
+    }
+    scroll.min(n_rows.saturating_sub(max_visible))
+}
+
+/// 鼠标点击命中今日列表某一行 → (任务/子任务 id, 深度)。未命中返回 None。
+pub fn row_at(app: &App, row: u16) -> Option<(String, u8)> {
+    if row < 2 {
+        return None;
+    }
+    let area = content_rect(app);
+    if row >= area.y + area.height {
+        return None;
+    }
+    let slot = CARD_H + CARD_GAP;
+    let rel = row - area.y;
+    let idx = (rel / slot) as usize + view_scroll(app, area);
+    app.visible_ids().get(idx).cloned()
 }
 
 /// 输入条（新增/编辑），位于内容区与键位栏之间。
