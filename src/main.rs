@@ -8,7 +8,7 @@ mod theme;
 mod ui;
 
 use app::{App, InputMode, Page, SyncStatus};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
@@ -22,7 +22,10 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(&store);
 
     let mut terminal = ratatui::init();
+    // 开启鼠标捕获：支持点击顶栏 tab / 分类导航（退出前必须还原）
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     let result = run(&mut terminal, &mut app, &store);
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     ratatui::restore();
     result
 }
@@ -37,14 +40,56 @@ fn run(
         terminal.draw(|f| draw(f, app))?;
 
         if crossterm::event::poll(std::time::Duration::from_millis(200))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.kind == crossterm::event::KeyEventKind::Press {
+            match crossterm::event::read()? {
+                Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
                     on_key(key, app, store);
                 }
+                Event::Mouse(m) => on_mouse(m, app),
+                _ => {}
             }
         }
     }
     Ok(())
+}
+
+/// 鼠标左键点击：顶栏第 0 行切页面 tab；分类条第 1 行切分类 / 添加分类。
+/// 有弹层打开时忽略点击，避免输入中误切页面。
+fn on_mouse(m: MouseEvent, app: &mut App) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if app.input.is_some()
+        || app.cat_modal.is_some()
+        || app.del_cat_modal.is_some()
+        || app.help_open
+    {
+        return;
+    }
+    if !matches!(
+        m.kind,
+        MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Down(MouseButton::Left)
+    ) {
+        return;
+    }
+    let (row, col) = (m.row, m.column);
+    if row == 0 {
+        // 顶栏 tabs
+        for (p, x0, w) in ui::topbar_tab_hits(app) {
+            if col >= x0 && col < x0 + w {
+                app.page = p;
+                return;
+            }
+        }
+    } else if row == 1 {
+        // 分类导航条（含"添加分类"）
+        for (target, x0, w) in ui::catbar_hits(app) {
+            if col >= x0 && col < x0 + w {
+                match target {
+                    ui::CatTarget::Cat(name) => app.cat = name,
+                    ui::CatTarget::AddCat => app.open_cat_modal(),
+                }
+                return;
+            }
+        }
+    }
 }
 
 fn theme_of(app: &App) -> Theme {
@@ -469,6 +514,60 @@ mod key_tests {
         app.goto_today();
         assert_eq!(app.cal_sel, today);
         assert_eq!(app.cal_month, (today.year(), today.month()));
+    }
+
+    #[test]
+    fn mouse_click_tab_and_cat() {
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mouse-test") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-mouse-test");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Today;
+
+        let mk = |col: u16, row: u16| crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        // 顶栏第 0 行点击"统计"标签 → 切到统计页
+        let hits = ui::topbar_tab_hits(&app);
+        let (_, x0, w) = *hits.iter().find(|(p, _, _)| *p == Page::Stats).unwrap();
+        on_mouse(mk(x0 + w / 2, 0), &mut app);
+        assert_eq!(app.page, Page::Stats, "顶栏点击应切换页面");
+
+        // 分类条第 1 行点击"全部"
+        let chits = ui::catbar_hits(&app);
+        let (_, x0, w) = *chits
+            .iter()
+            .find(|(t, _, _)| matches!(t, ui::CatTarget::Cat(n) if n == "全部"))
+            .unwrap();
+        on_mouse(mk(x0 + w / 2, 1), &mut app);
+        assert_eq!(app.cat, "全部");
+
+        // 点击第一个非"全部"分类
+        if let Some((_, x0, w)) = chits
+            .iter()
+            .find(|(t, _, _)| matches!(t, ui::CatTarget::Cat(n) if n != "全部"))
+        {
+            on_mouse(mk(*x0 + w / 2, 1), &mut app);
+            assert_ne!(app.cat, "全部", "点击分类应切换到该分类");
+        }
+
+        // 点击内容区空白 → 不影响
+        let p0 = app.page;
+        on_mouse(mk(3, 10), &mut app);
+        assert_eq!(app.page, p0);
+
+        // 弹层打开时点击被忽略
+        app.open_cat_modal();
+        let (_, x0, _) = *ui::topbar_tab_hits(&app)
+            .iter()
+            .find(|(p, _, _)| *p != app.page)
+            .unwrap();
+        on_mouse(mk(x0 + 1, 0), &mut app);
+        assert!(app.cat_modal.is_some(), "弹层打开时点击不应切页");
     }
 
     #[test]

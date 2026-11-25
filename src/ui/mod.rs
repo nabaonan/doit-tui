@@ -177,6 +177,53 @@ pub fn draw_catbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     );
 }
 
+/// 顶栏/分类条鼠标点击命中目标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatTarget {
+    Cat(String), // 分类名（含"全部"）
+    AddCat,      // "＋ 添加分类"
+}
+
+/// 顶栏导航 tab 的可点击列区间（与 draw_topbar 同源计算，避免命中与渲染错位）。
+/// 返回 (页面, 起始列, 宽度)，列从 0 起；顶栏为终端第 0 行。
+pub fn topbar_tab_hits(app: &App) -> Vec<(Page, u16, u16)> {
+    let mut out = Vec::new();
+    let mut x = disp_w(" doit ") as u16 + 1; // logo + 后随空格
+    for i in 0..4usize {
+        let p = Page::from_index(i);
+        let w = if p == app.page {
+            disp_w(&format!(" {} {} ", p.label(), i + 1))
+        } else {
+            disp_w(&format!(" {}", p.label())) + disp_w(&format!(" {} ", i + 1))
+        } as u16;
+        out.push((p, x, w));
+        x += w + 1; // tab 之间用空格分隔（与渲染一致）
+    }
+    out
+}
+
+/// 分类导航条的可点击列区间（与 draw_catbar 同源计算）。分类条为终端第 1 行。
+pub fn catbar_hits(app: &App) -> Vec<(CatTarget, u16, u16)> {
+    let mut out = Vec::new();
+    let mut x: u16 = 0;
+
+    let all = ("全部".to_string(), app.cat_pending("全部"));
+    let w = disp_w(&format!(" ● {} {} ", all.0, all.1)) as u16;
+    out.push((CatTarget::Cat(all.0), x, w));
+    x += w;
+
+    for c in app.snap.active_categories() {
+        let w = disp_w(&format!(" ● {} {} ", c.name, app.cat_pending(&c.name))) as u16;
+        out.push((CatTarget::Cat(c.name.clone()), x, w));
+        x += w;
+    }
+
+    x += 1; // 分类与"添加分类"之间的空格
+    let add_w = disp_w("＋ 添加分类 ") as u16;
+    out.push((CatTarget::AddCat, x, add_w));
+    out
+}
+
 // ---------- 底部键位栏 ----------
 
 pub fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
