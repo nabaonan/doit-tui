@@ -1,6 +1,6 @@
 [package]
 name = "doit-tui"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "doit 待办应用终端版（ratatui）"
 
