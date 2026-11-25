@@ -16,24 +16,45 @@ use crate::theme::{hex_color, Theme};
 use chrono::Datelike;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    use crate::app::HeatScope;
     use ratatui::layout::{Constraint, Layout};
-    // 三种周期统一布局：切换胶囊 / 日期范围（卡外独立一行）/ 两卡并排 / 全宽趋势图
+    // 布局：切换胶囊 / 日期范围 / 图表行 / 底部行
     let rows = Layout::vertical([
         Constraint::Length(1),  // 周期切换（近一周/近一月/近一年）
         Constraint::Length(1),  // 日期范围（图外独立一行）
-        Constraint::Length(12), // 热力图 + 分类占比
-        Constraint::Length(16), // 完成趋势折线图（全宽）
+        Constraint::Length(12), // 热力图（+周/月时并列分类占比）
+        Constraint::Length(16), //  趋势图（或 + 分类占比）
         Constraint::Min(0),
     ])
     .split(area);
-    let cols = Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
-        .split(rows[2]);
 
     draw_period_tabs(f, app, rows[0], theme);
-    draw_period_range(f, app, rows[1], cols[0].width, theme);
-    draw_heatmap(f, app, cols[0], theme);
-    draw_donut(f, app, cols[1], theme);
-    draw_trend(f, app, rows[3], theme);
+    // 日期范围行需知道热力图卡片宽度（53 周裁剪口径）
+    let heat_w = if app.heat == HeatScope::Year {
+        rows[2].width
+    } else {
+        (rows[2].width as u32 * 56 / 100) as u16
+    };
+    draw_period_range(f, app, rows[1], heat_w, theme);
+
+    match app.heat {
+        // 近一周 / 近一月：热力图(56%) + 分类占比(44%) 并排，趋势图全宽在底
+        HeatScope::Week | HeatScope::Month => {
+            let cols = Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+                .split(rows[2]);
+            draw_heatmap(f, app, cols[0], theme);
+            draw_donut(f, app, cols[1], theme);
+            draw_trend(f, app, rows[3], theme);
+        }
+        // 近一年：热力图全屏宽度横幅，分类占比(44%) + 趋势图(56%) 并排在底
+        HeatScope::Year => {
+            draw_heatmap(f, app, rows[2], theme);
+            let cols = Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(56)])
+                .split(rows[3]);
+            draw_donut(f, app, cols[0], theme);
+            draw_trend(f, app, cols[1], theme);
+        }
+    }
 }
 
 /// 当前周期的日期范围（热力图卡片外的独立一行）。
@@ -136,6 +157,25 @@ fn draw_period_tabs(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     );
 }
 
+/// 周期切换胶囊（近一周/近一月/近一年）的可点击列区间，与 draw_period_tabs 同源计算。
+/// 统计页第 0 行（全局第 2 行）。
+pub fn period_tab_hits(app: &App) -> Vec<(crate::app::HeatScope, u16, u16)> {
+    use crate::app::HeatScope;
+    let scopes: [(HeatScope, &str); 3] = [
+        (HeatScope::Week, "近一周"),
+        (HeatScope::Month, "近一月"),
+        (HeatScope::Year, "近一年"),
+    ];
+    let mut out = Vec::new();
+    let mut x: u16 = 1; // 首行前置空格
+    for (s, label) in scopes {
+        let w = crate::ui::disp_w(&format!(" {} ", label)) as u16;
+        out.push((s, x, w));
+        x += w + 1; // 胶囊后随空格
+    }
+    out
+}
+
 fn completion_by_day(app: &App) -> BTreeMap<chrono::NaiveDate, u32> {
     use crate::model::Subtask;
     let mut map = BTreeMap::new();
@@ -173,7 +213,12 @@ pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
     use chrono::Datelike;
 
     let area_w = app.area.width;
-    let heat_w = (area_w as u32 * 56 / 100) as u16; // 热力图占 56% 卡片
+    // 近一年为全屏宽度卡片，本周/本月为 56% 卡片
+    let heat_w = if app.heat == HeatScope::Year {
+        area_w
+    } else {
+        (area_w as u32 * 56 / 100) as u16
+    };
     if col >= heat_w {
         return None;
     }
@@ -243,23 +288,37 @@ pub fn heat_day_at(app: &App, row: u16, col: u16) -> Option<chrono::NaiveDate> {
             }
             let (start, end, weeks) = year_weeks(today);
             let jan1 = chrono::NaiveDate::from_ymd_opt(y, 1, 1)?;
-            // 与渲染同口径：inner 宽 = 卡片内宽 - 2 边框 → usable = 再 - 4 padding
+            // 与渲染同口径：全宽大格(2列/周)，放不下才退化窄格(1列/周)
             let inner_w = heat_w.saturating_sub(2);
-            let usable = inner_w.saturating_sub(4) as usize;
-            let start_wk = if usable >= weeks { 0 } else { weeks - usable };
-            let drawn = (col - text_x) as usize;
-            if drawn >= usable {
-                return None;
+            if inner_w.saturating_sub(4) as usize / 2 >= weeks {
+                // 大格模式：每格 2 列
+                let wk = ((col - text_x) / 2) as usize;
+                if wk >= weeks {
+                    return None;
+                }
+                let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
+                if d < jan1 || d > end {
+                    return None;
+                }
+                Some(d)
+            } else {
+                // 窄格模式：每格 1 列，裁掉最早的周
+                let usable = inner_w.saturating_sub(4) as usize;
+                let start_wk = weeks.saturating_sub(usable).min(weeks);
+                let drawn = (col - text_x) as usize;
+                if drawn >= usable {
+                    return None;
+                }
+                let wk = start_wk + drawn;
+                if wk >= weeks {
+                    return None;
+                }
+                let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
+                if d < jan1 || d > end {
+                    return None;
+                }
+                Some(d)
             }
-            let wk = start_wk + drawn;
-            if wk >= weeks {
-                return None;
-            }
-            let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
-            if d < jan1 || d > end {
-                return None;
-            }
-            Some(d)
         }
     }
 }
@@ -361,18 +420,28 @@ fn draw_heatmap(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             let (start, end, weeks) = year_weeks(today);
             let jan1 = chrono::NaiveDate::from_ymd_opt(y, 1, 1).unwrap();
 
-            // 半宽卡片里 53 周 × 2 列放不下：年视图用小方格 `▪`（1 列/周，字形自带空隙），
-            // 放不下时裁掉最早的周（副标题在卡片外的日期范围行提示）。
-            let usable = inner.width.saturating_sub(4) as usize;
-            let start_wk = if usable >= weeks { 0 } else { weeks - usable };
+            // 近一年热力图：全屏宽度，53 周 × 2 列用大格 `▄ `（横纵等距）。
+            // 只有终端极窄放不下时（占 2 列/周），才退化为 1 列小格 `▪`。
+            let usable2 = inner.width.saturating_sub(4) as usize / 2;
+            let wide = usable2 >= weeks;
+            let (start_wk, sym) = if wide {
+                (0usize, "▄ ")
+            } else {
+                let u1 = inner.width.saturating_sub(4) as usize;
+                (weeks.saturating_sub(u1).min(weeks), "▪")
+            };
             for dow in 0..7usize {
                 let mut spans = Vec::new();
                 for wk in start_wk..weeks {
                     let d = start + chrono::Duration::days((wk * 7 + dow) as i64);
                     if d < jan1 || d > end {
-                        spans.push(Span::raw(" "));
+                        if wide {
+                            spans.push(Span::raw("  "));
+                        } else {
+                            spans.push(Span::raw(" "));
+                        }
                     } else {
-                        spans.push(cell(d, "▪"));
+                        spans.push(cell(d, sym));
                     }
                 }
                 rows.push(Line::from(spans));

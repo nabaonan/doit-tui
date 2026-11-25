@@ -7,7 +7,7 @@ mod sync;
 mod theme;
 mod ui;
 
-use app::{App, InputMode, Page, SyncStatus};
+use app::{App, HeatScope, InputMode, Page, SyncStatus};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
@@ -119,8 +119,17 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
                 app.cal_month = (d.year(), d.month());
             }
         }
-        // 统计页：点击热力图格子 → 该日完成数 toast（"亮色的点"）
+        // 统计页：第 2 行点击周期胶囊切换周期；热力图格子点击看该日完成数
         Page::Stats => {
+            if row == 2 {
+                for (scope, x0, w) in ui::stats::period_tab_hits(app) {
+                    if col >= x0 && col < x0 + w {
+                        app.heat = scope;
+                        return;
+                    }
+                }
+                return;
+            }
             if let Some(d) = ui::stats::heat_day_at(app, row, col) {
                 let n = ui::stats::day_completed(app, d);
                 use chrono::Datelike;
@@ -725,6 +734,30 @@ mod key_tests {
         // CJK 宽字符在 buffer 中各占一个占位空单元，需去空白后再比对
         let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("工作"), "有内容的分类应保留在图例");
+    }
+
+    #[test]
+    fn mouse_click_period_tabs_switches_scope() {
+        unsafe { std::env::set_var("DOIT_TUI_DIR", "/tmp/doit-tui-mper") };
+        let _ = std::fs::remove_dir_all("/tmp/doit-tui-mper");
+        let store = Store::new();
+        let mut app = App::new(&store);
+        app.page = Page::Stats;
+        app.heat = HeatScope::Week;
+        let hits = ui::stats::period_tab_hits(&app);
+        let (year_scope, x0, w) = *hits
+            .iter()
+            .find(|(s, _, _)| *s == HeatScope::Year)
+            .unwrap();
+        assert_ne!(app.heat, year_scope);
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: x0 + w / 2,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        on_mouse(ev, &mut app);
+        assert_eq!(app.heat, HeatScope::Year, "点击周期胶囊应切换热力图周期");
     }
 
     #[test]
