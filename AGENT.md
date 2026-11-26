@@ -132,7 +132,9 @@ DEFAULT_CATEGORY_COLOR = #34C7A8
 - `Ctrl+C` 分层关闭；其它 `Ctrl` 组合键一律忽略（`Ctrl+P` 在输入条内例外），避免误触单字母快捷键
 - 设置页 `v` 检查更新、`i` 下载安装：网络请求在后台线程，`App::poll_update()` 每帧收取结果，禁止在事件循环里同步请求
 - 任务标题后缀 `!1`~`!4` 在 `app.rs` 解析为优先级
-- 今日页 `o` 切「紧急优先」：`App::cat_tasks()` 稳定降序（4→0），只影响顶级任务，`visible_ids()` 里展开的子任务顺序不动；偏好存 `Settings.sort_by_priority`（settings.json），不进同步快照；顶栏只在今日页显示红色旗标胶囊
+- 今日页只显示未完成 + 今日完成的顶级任务：`cat_tasks()` 每次调用实时 `Local::now().date_naive()` 过滤，`completed_at` 非今日（含缺失）一律隐藏；`today_stats()` 直接复用它，别再单独写过滤以免口径漂移；同步落盘后 `do_sync()` 调 `ensure_selection()` 修正选中项
+- 今日页 `o` 或**点击顶栏红色旗标**切「紧急优先」：`App::cat_tasks()` 稳定降序（4→0），只影响顶级任务，`visible_ids()` 里展开的子任务顺序不动；偏好存 `Settings.sort_by_priority`（settings.json），不进同步快照；顶栏只在今日页显示红色旗标胶囊
+- 顶栏鼠标命中用 `ui::topbar_sort_hit()`，位置由 `topbar_right()` 与渲染共用计算，窄屏精简后也不会错位；`on_mouse()` 需要 `store` 参数来立即保存偏好
 - 终端宽度自适应：顶栏 / 键位栏有 full / short / 极简三级；中文宽度用 `unicode-width`
 
 改动键位时保留这些顺序，并补充 `main.rs` 中 `key_tests` 的覆盖。

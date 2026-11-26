@@ -43,11 +43,77 @@ pub fn ring_char(pct: usize) -> &'static str {
 
 // ---------- 顶栏 ----------
 
-pub fn draw_topbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+/// 顶栏左侧（logo + 4 个页面 tab）的总宽度；渲染与鼠标命中共用，避免位置漂移。
+fn topbar_left_width(app: &App) -> usize {
+    let mut w = disp_w(" doit ") + disp_w(" ");
+    for i in 0..4 {
+        let p = Page::from_index(i);
+        if p == app.page {
+            w += disp_w(&format!(" {} {} ", p.label(), i + 1));
+        } else {
+            w += disp_w(&format!(" {}", p.label())) + disp_w(&format!(" {} ", i + 1));
+        }
+        w += disp_w(" ");
+    }
+    w
+}
+
+/// 顶栏右侧三段的文本与左侧填充空格数（紧急优先 / 同步 / 日期）。
+/// 与 draw_topbar 同源：鼠标命中直接用这里的计算结果，窄屏精简规则也不会错位。
+fn topbar_right(app: &App, width: usize, left_w: usize) -> (String, String, String, usize) {
     let (done, total) = app.today_stats();
     let pct = if total > 0 { 100 * done / total } else { 0 };
     let now = chrono::Local::now();
 
+    let sync_full = format!(" ● {} r{} ", app.sync_status.label(), app.revision);
+    let sync_mid = format!(" ● {} ", app.sync_status.label());
+    let date_full = format!(" {}月{}日 {} {}{}% ", now.month(), now.day(), zh_weekday(now.weekday()), ring_char(pct), pct);
+    let date_mid = format!(" {}/{} {}{}% ", now.month(), now.day(), ring_char(pct), pct);
+
+    // 先按最精简的旗标占位，再决定要不要展开成完整文字，避免窄屏挤掉同步状态。
+    let mut sort_txt = if app.page == Page::Today {
+        if app.settings.sort_by_priority {
+            " ⚑紧急优先✓ "
+        } else {
+            " ⚑紧急优先 "
+        }
+    } else {
+        ""
+    };
+    if !sort_txt.is_empty() && left_w + disp_w(sort_txt) + disp_w(&sync_mid) > width {
+        sort_txt = " ⚑ ";
+    }
+    let sort_w = disp_w(sort_txt);
+    let fits = |a: &str, b: &str| left_w + sort_w + disp_w(a) + disp_w(b) <= width;
+    let (sync_txt, date_txt) = if fits(&sync_full, &date_full) {
+        (sync_full, date_full)
+    } else if fits(&sync_mid, &date_full) {
+        (sync_mid, date_full)
+    } else if fits(&sync_mid, &date_mid) {
+        (sync_mid, date_mid)
+    } else {
+        (sync_mid.clone(), String::new())
+    };
+    let right_w = sort_w + disp_w(&sync_txt) + disp_w(&date_txt);
+    let pad = width.saturating_sub(left_w + right_w);
+    (sort_txt.to_string(), sync_txt, date_txt, pad)
+}
+
+/// 顶栏「紧急优先」胶囊的可点击列区间；None 表示当前页不显示该胶囊。
+pub fn topbar_sort_hit(app: &App) -> Option<(u16, u16)> {
+    if app.page != Page::Today {
+        return None;
+    }
+    let width = app.area.width as usize;
+    let left_w = topbar_left_width(app);
+    let (sort_txt, _, _, pad) = topbar_right(app, width, left_w);
+    if sort_txt.is_empty() {
+        return None;
+    }
+    Some(((left_w + pad) as u16, disp_w(&sort_txt) as u16))
+}
+
+pub fn draw_topbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // 左侧：logo + 页面 tabs
     let mut left: Vec<Span> = Vec::new();
     left.push(Span::styled(
@@ -77,42 +143,13 @@ pub fn draw_topbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     // 右侧：紧急优先（仅今日页）+ 同步胶囊 + 日期环形进度胶囊；宽度不足时逐级精简
     let sync_c = app.sync_status.color(theme);
-    let sync_full = format!(" ● {} r{} ", app.sync_status.label(), app.revision);
-    let sync_mid = format!(" ● {} ", app.sync_status.label());
-    let date_full = format!(" {}月{}日 {} {}{}% ", now.month(), now.day(), zh_weekday(now.weekday()), ring_char(pct), pct);
-    let date_mid = format!(" {}/{} {}{}% ", now.month(), now.day(), ring_char(pct), pct);
     let urgent = priority_color(4).unwrap_or(theme.accent);
 
     let width = area.width as usize;
     let left_w: usize = left.iter().map(|s| disp_w(&s.content)).sum();
-    // 先按最精简的旗标占位，再决定要不要展开成完整文字，避免窄屏挤掉同步状态。
-    let mut sort_txt = if app.page == Page::Today {
-        if app.settings.sort_by_priority {
-            " ⚑紧急优先✓ "
-        } else {
-            " ⚑紧急优先 "
-        }
-    } else {
-        ""
-    };
-    if !sort_txt.is_empty() && left_w + disp_w(sort_txt) + disp_w(&sync_mid) > width {
-        sort_txt = " ⚑ ";
-    }
-    let sort_w = disp_w(sort_txt);
-    let fits = |a: &str, b: &str| left_w + sort_w + disp_w(a) + disp_w(b) <= width;
-    let (sync_txt, date_txt) = if fits(&sync_full, &date_full) {
-        (sync_full, date_full)
-    } else if fits(&sync_mid, &date_full) {
-        (sync_mid, date_full)
-    } else if fits(&sync_mid, &date_mid) {
-        (sync_mid, date_mid)
-    } else {
-        (sync_mid.clone(), String::new())
-    };
+    let (sort_txt, sync_txt, date_txt, pad) = topbar_right(app, width, left_w);
 
     let mut spans = left;
-    let right_w = sort_w + disp_w(&sync_txt) + disp_w(&date_txt);
-    let pad = width.saturating_sub(left_w + right_w);
     spans.push(Span::raw(" ".repeat(pad)));
     if !sort_txt.is_empty() {
         let style = if app.settings.sort_by_priority {
@@ -254,7 +291,7 @@ pub fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         Page::Today => &[
             ("1-4", "页面"), ("[ ]", "分类"), ("c", "新建分类"), ("h/l", "折叠"),
             ("j/k", "移动"), ("space", "完成"), ("a", "新增"), ("e", "编辑"), ("d", "删除"),
-            ("p", "优先级"), ("o", "紧急优先"), ("s", "同步"), ("t", "主题"), ("?", "帮助"), ("q", "退出"),
+            ("p", "优先级"), ("o/点击", "紧急优先"), ("s", "同步"), ("t", "主题"), ("?", "帮助"), ("q", "退出"),
         ],
         Page::Stats => &[
             ("1-4", "页面"), ("[ ]", "分类"), ("←/→", "热力周期"),
@@ -377,7 +414,7 @@ pub fn draw_help(f: &mut Frame, theme: &Theme) {
         ("e", "编辑选中标题（已完成不可编辑）"),
         ("d", "删除选中任务"),
         ("p", "循环切换优先级 0不设→1低→2普通→3高→4紧急"),
-        ("o", "今日页紧急优先：只重排顶级任务，子任务顺序不变"),
+        ("o / 点击顶栏旗标", "今日页紧急优先：只重排顶级任务，子任务顺序不变"),
         ("h / l", "今日页折叠/展开父任务；月历页前后一天选日"),
         ("j / k", "今日页移动选中；月历页上一行/下一行（±7 天）"),
         ("s", "触发 WebDAV 同步"),

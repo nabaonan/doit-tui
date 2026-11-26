@@ -328,12 +328,20 @@ impl App {
 
     // ---------- 列表与选中 ----------
 
+    /// 今日页可见的顶级任务：未完成，或完成日期就是今天。
+    /// 与桌面 showInToday / gpui today_tree / 手机端口径一致：
+    /// 非今日完成的历史任务归档隐藏（月视图与统计里仍可查到）。
+    /// 每次调用实时取当天日期，因此同步落盘后下一次渲染自然刷新，不需要额外缓存失效。
     pub fn cat_tasks(&self) -> Vec<&Task> {
+        let today = chrono::Local::now().date_naive();
         let mut tasks: Vec<&Task> = if self.cat == "全部" {
             self.snap.active_tasks().collect()
         } else {
             self.snap.tasks.iter().filter(|t| t.deleted_at.is_none() && t.category == self.cat).collect()
         };
+        tasks.retain(|t| {
+            !t.done || t.completed_at.map(|c| crate::model::completed_on(c) == today).unwrap_or(false)
+        });
         // 「紧急优先」只重排顶级任务，子任务在 visible_ids 里仍按原顺序展开。
         if self.settings.sort_by_priority {
             tasks.sort_by(|a, b| b.priority.cmp(&a.priority)); // sort_by 稳定：同级保序
@@ -1001,17 +1009,10 @@ impl App {
 
     /// 分母 = 未整体完成 + 今日完成的顶级任务（当前分类过滤）；分子 = 今日完成。
     pub fn today_stats(&self) -> (usize, usize) {
-        let today = chrono::Local::now().date_naive();
+        // cat_tasks() 已按今日口径过滤，这里只数即可，避免两处口径漂移。
         let tasks = self.cat_tasks();
-        let total = tasks
-            .iter()
-            .filter(|t| !t.done || t.completed_at.map(|c| crate::model::completed_on(c) == today).unwrap_or(false))
-            .count();
-        let done = tasks
-            .iter()
-            .filter(|t| t.done && t.completed_at.map(|c| crate::model::completed_on(c) == today).unwrap_or(false))
-            .count();
-        (done, total)
+        let done = tasks.iter().filter(|t| t.done).count();
+        (done, tasks.len())
     }
 
     #[allow(dead_code)]
@@ -1118,6 +1119,56 @@ mod tests {
         assert!(!store.load_settings().sort_by_priority, "偏好应写入 settings.json");
         let ids: Vec<String> = app.visible_ids().into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["a", "b", "s1", "s2", "c", "d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cat_tasks_hides_non_today_completed() {
+        use chrono::{Duration, TimeZone};
+        let dir = std::env::temp_dir().join(format!("doit-tui-today-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::with_dir(dir.clone());
+        let mut app = App::new(&store);
+
+        let now = now_ms();
+        let today = chrono::Local::now().date_naive();
+        let yesterday = (today - Duration::days(1))
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+
+        let task = |id: &str, title: &str, done: bool, completed_at: Option<i64>| Task {
+            id: id.into(),
+            title: title.into(),
+            category: "全部".into(),
+            priority: 2,
+            done,
+            created_at: now,
+            updated_at: now,
+            completed_at,
+            subs: vec![],
+            deleted_at: None,
+            sort_order: 0,
+        };
+        app.snap.tasks = vec![
+            task("today_done", "今日完成", true, Some(now)),
+            task("old_done", "昨日完成", true, Some(yesterday)),
+            task("done_no_time", "完成无时间", true, None),
+            task("pending", "未完成", false, None),
+        ];
+
+        let ids: Vec<&str> = app.cat_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"today_done"), "今日完成应显示");
+        assert!(ids.contains(&"pending"), "未完成应显示");
+        assert!(!ids.contains(&"old_done"), "非今日完成应归档隐藏");
+        assert!(!ids.contains(&"done_no_time"), "完成时间缺失应归档隐藏");
+
+        let (done, total) = app.today_stats();
+        assert_eq!((done, total), (1, 2), "统计与列表口径应一致");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

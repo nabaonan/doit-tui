@@ -53,7 +53,7 @@ fn run(
                 Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
                     on_key(key, app, store);
                 }
-                Event::Mouse(m) => on_mouse(m, app),
+                Event::Mouse(m) => on_mouse(m, app, store),
                 _ => {}
             }
         }
@@ -64,7 +64,7 @@ fn run(
 /// 鼠标左键点击（仅松开瞬间 Up 触发，避免 Down/Up 双击导致折叠来回切换）：
 /// 顶栏第 0 行切页面 tab；分类条第 1 行切分类 / 添加分类；内容区按页面分派。
 /// 有弹层打开时忽略点击，避免输入中误切页面。
-fn on_mouse(m: MouseEvent, app: &mut App) {
+fn on_mouse(m: MouseEvent, app: &mut App, store: &Store) {
     use crossterm::event::{MouseButton, MouseEventKind};
     if app.input.is_some()
         || app.cat_modal.is_some()
@@ -78,6 +78,13 @@ fn on_mouse(m: MouseEvent, app: &mut App) {
     }
     let (row, col) = (m.row, m.column);
     if row == 0 {
+        // 顶栏「紧急优先」胶囊（仅今日页显示，位置与渲染同源）
+        if let Some((x0, w)) = ui::topbar_sort_hit(app) {
+            if col >= x0 && col < x0 + w {
+                app.toggle_sort_by_priority(store);
+                return;
+            }
+        }
         // 顶栏 tabs
         for (p, x0, w) in ui::topbar_tab_hits(app) {
             if col >= x0 && col < x0 + w {
@@ -386,6 +393,8 @@ fn do_sync(app: &mut App, store: &Store) {
             app.revision = app.snap.revision;
             app.sync_status = SyncStatus::Synced;
             app.toast(note);
+            // 同步后今日列表按当天日期重新过滤；原选中项若变成「非今日完成」要立即改选可见项。
+            app.ensure_selection();
             let _ = store.save_snapshot(&app.snap);
         }
         Err(e) => {
@@ -595,7 +604,7 @@ mod key_tests {
         // 顶栏第 0 行点击"统计"标签 → 切到统计页
         let hits = ui::topbar_tab_hits(&app);
         let (_, x0, w) = *hits.iter().find(|(p, _, _)| *p == Page::Stats).unwrap();
-        on_mouse(mk(x0 + w / 2, 0), &mut app);
+        on_mouse(mk(x0 + w / 2, 0), &mut app, &store);
         assert_eq!(app.page, Page::Stats, "顶栏点击应切换页面");
 
         // 分类条第 1 行点击"全部"
@@ -604,7 +613,7 @@ mod key_tests {
             .iter()
             .find(|(t, _, _)| matches!(t, ui::CatTarget::Cat(n) if n == "全部"))
             .unwrap();
-        on_mouse(mk(x0 + w / 2, 1), &mut app);
+        on_mouse(mk(x0 + w / 2, 1), &mut app, &store);
         assert_eq!(app.cat, "全部");
 
         // 点击第一个非"全部"分类
@@ -612,13 +621,13 @@ mod key_tests {
             .iter()
             .find(|(t, _, _)| matches!(t, ui::CatTarget::Cat(n) if n != "全部"))
         {
-            on_mouse(mk(*x0 + w / 2, 1), &mut app);
+            on_mouse(mk(*x0 + w / 2, 1), &mut app, &store);
             assert_ne!(app.cat, "全部", "点击分类应切换到该分类");
         }
 
         // 点击内容区空白 → 不影响
         let p0 = app.page;
-        on_mouse(mk(3, 10), &mut app);
+        on_mouse(mk(3, 10), &mut app, &store);
         assert_eq!(app.page, p0);
 
         // 弹层打开时点击被忽略
@@ -627,8 +636,46 @@ mod key_tests {
             .iter()
             .find(|(p, _, _)| *p != app.page)
             .unwrap();
-        on_mouse(mk(x0 + 1, 0), &mut app);
+        on_mouse(mk(x0 + 1, 0), &mut app, &store);
         assert!(app.cat_modal.is_some(), "弹层打开时点击不应切页");
+    }
+
+    #[test]
+    fn mouse_click_sort_pill_toggles_priority() {
+        let dir = std::env::temp_dir().join(format!("doit-tui-msort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::with_dir(dir.clone());
+        let mut app = App::new(&store);
+        app.page = Page::Today;
+        app.area = ratatui::layout::Rect::new(0, 0, 120, 34);
+        assert!(!app.settings.sort_by_priority);
+
+        let (x0, w) = ui::topbar_sort_hit(&app).expect("今日页应显示紧急优先胶囊");
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: x0 + w / 2,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        on_mouse(ev, &mut app, &store);
+        assert!(app.settings.sort_by_priority, "点击顶栏旗标应开启紧急优先");
+        assert!(store.load_settings().sort_by_priority, "偏好应立即写盘");
+
+        // 再点一次关闭
+        let (x0, w) = ui::topbar_sort_hit(&app).expect("开启后胶囊仍应显示");
+        let ev2 = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: x0 + w / 2,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        on_mouse(ev2, &mut app, &store);
+        assert!(!app.settings.sort_by_priority, "再次点击应关闭");
+
+        // 其它页不显示胶囊，点击不误触
+        app.page = Page::Stats;
+        assert!(ui::topbar_sort_hit(&app).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -648,11 +695,11 @@ mod key_tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         // 点击 1 号所在的网格（第 4 行，第 off 列）
-        on_mouse(mk(4 + off * 5, 4), &mut app);
+        on_mouse(mk(4 + off * 5, 4), &mut app, &store);
         assert_eq!(app.cal_sel, first, "点击日期应选中该天");
         // 点击无效区域（内容区空白）不改选中
         let before = app.cal_sel;
-        on_mouse(mk(99, 20), &mut app);
+        on_mouse(mk(99, 20), &mut app, &store);
         assert_eq!(app.cal_sel, before);
     }
 
@@ -672,16 +719,16 @@ mod key_tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         // 内容区第 1 个卡片 = 第 2 行 → t1；第一次点击收起
-        on_mouse(mk(10, 2), &mut app);
+        on_mouse(mk(10, 2), &mut app, &store);
         assert!(!app.expanded.iter().any(|e| e == &t1), "点击父级应收起子任务");
         assert_eq!(app.sel.as_deref(), Some(t1.as_str()));
         // 再次点击展开
-        on_mouse(mk(10, 2), &mut app);
+        on_mouse(mk(10, 2), &mut app, &store);
         assert!(app.expanded.iter().any(|e| e == &t1), "再次点击应展开子任务");
         // 点击无子任务的叶子（子任务行）只选中不折叠
         if let Some(sub) = app.snap.tasks[0].subs.first().map(|s| s.id.clone()) {
             let idx = app.visible_ids().iter().position(|(id, _)| id == &sub).unwrap();
-            on_mouse(mk(10, 2 + idx as u16 * 4), &mut app);
+            on_mouse(mk(10, 2 + idx as u16 * 4), &mut app, &store);
             assert_eq!(app.sel.as_deref(), Some(sub.as_str()));
         }
     }
@@ -707,7 +754,7 @@ mod key_tests {
             row: 9,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        on_mouse(ev, &mut app);
+        on_mouse(ev, &mut app, &store);
         assert!(app.toast.is_some(), "点击热力图应有完成数提示");
     }
 
@@ -764,7 +811,7 @@ mod key_tests {
             row: 2,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        on_mouse(ev, &mut app);
+        on_mouse(ev, &mut app, &store);
         assert_eq!(app.heat, HeatScope::Year, "点击周期胶囊应切换热力图周期");
     }
 
