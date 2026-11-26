@@ -156,6 +156,12 @@ pub struct App {
     pub revision: u64,
     pub toast: Option<(String, std::time::Instant)>,
     pub list_scroll: usize,
+    /// 检查更新 / 下载安装的异步结果与展示状态（网络请求在后台线程，不阻塞界面）。
+    pub update_check_rx: Option<std::sync::mpsc::Receiver<Result<Option<crate::update::UpdateInfo>, String>>>,
+    pub update_install_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    pub update_busy: bool,
+    pub update_info: Option<crate::update::UpdateInfo>,
+    pub update_hint: String,
     dirty: bool,
 }
 
@@ -199,6 +205,11 @@ impl App {
             },
             toast: None,
             list_scroll: 0,
+            update_check_rx: None,
+            update_install_rx: None,
+            update_busy: false,
+            update_info: None,
+            update_hint: format!("v{} · 按 v 检查更新", env!("CARGO_PKG_VERSION")),
             dirty: false,
         }
     }
@@ -211,6 +222,93 @@ impl App {
         if let Some((_, t)) = &self.toast {
             if t.elapsed() > std::time::Duration::from_secs(4) {
                 self.toast = None;
+            }
+        }
+    }
+
+    // ---------- 检查更新 / 本地下载安装 ----------
+
+    pub fn start_check_update(&mut self) {
+        if self.update_busy {
+            self.toast("更新操作正在进行中");
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::update::check_update());
+        });
+        self.update_check_rx = Some(rx);
+        self.update_busy = true;
+        self.update_hint = "正在检查更新…".into();
+        self.toast("正在检查 GitHub Releases…");
+    }
+
+    pub fn start_install_update(&mut self) {
+        if self.update_busy {
+            self.toast("更新操作正在进行中");
+            return;
+        }
+        let Some(info) = self.update_info.clone() else {
+            self.toast("请先按 v 检查更新");
+            return;
+        };
+        let version = info.version.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::update::install_update(&info));
+        });
+        self.update_install_rx = Some(rx);
+        self.update_busy = true;
+        self.update_hint = format!("正在下载安装 v{version}…");
+        self.toast(format!("正在下载安装 v{version}…"));
+    }
+
+    /// 事件循环每帧调用：收取后台结果并更新提示（不阻塞 UI）。
+    pub fn poll_update(&mut self) {
+        let check = self.update_check_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if check.is_some() {
+            self.update_check_rx = None;
+        }
+        let install = self.update_install_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if install.is_some() {
+            self.update_install_rx = None;
+        }
+        if let Some(result) = check {
+            self.update_busy = false;
+            match result {
+                Ok(Some(info)) => {
+                    self.update_hint = format!(
+                        "发现 v{}（{}）· 按 i 下载并安装 · 按 v 重新检查",
+                        info.version,
+                        info.asset_name
+                    );
+                    self.update_info = Some(info);
+                    self.toast("发现新版本 · 设置页按 i 下载并安装");
+                }
+                Ok(None) => {
+                    self.update_hint = format!("v{} 已是最新 · 按 v 重新检查", env!("CARGO_PKG_VERSION"));
+                    self.update_info = None;
+                    self.toast("已是最新版本");
+                }
+                Err(e) => {
+                    self.update_hint = format!("检查更新失败：{e} · 按 v 重试");
+                    self.update_info = None;
+                    self.toast(e);
+                }
+            }
+        }
+        if let Some(result) = install {
+            self.update_busy = false;
+            match result {
+                Ok(msg) => {
+                    self.update_hint = msg.clone();
+                    self.update_info = None;
+                    self.toast(msg);
+                }
+                Err(e) => {
+                    self.update_hint = format!("安装失败：{e}");
+                    self.toast(e);
+                }
             }
         }
     }

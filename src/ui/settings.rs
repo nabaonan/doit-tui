@@ -137,6 +137,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 Style::default().fg(theme.text),
             ),
         ]),
+        Line::from(vec![
+            Span::styled("  更新        ", Style::default().fg(theme.muted)),
+            Span::styled(app.update_hint.clone(), Style::default().fg(theme.accent)),
+            Span::styled(
+                format!(" · {}", crate::update::releases_url()),
+                Style::default().fg(theme.faint),
+            ),
+        ]),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }

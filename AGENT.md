@@ -51,7 +51,8 @@
 | `src/ui/today.rs` | 今日页任务树与输入条 |
 | `src/ui/stats.rs` | 统计页：指标、热力图、环形图、折线图 |
 | `src/ui/calendar.rs` | 月历页 |
-| `src/ui/settings.rs` | 设置页与版本显示 |
+| `src/ui/settings.rs` | 设置页与版本 / 更新状态显示 |
+| `src/update.rs` | GitHub Releases 检查更新、平台产物匹配、下载并替换本地可执行文件 |
 | `release.sh` | 版本号同步 + tag + push |
 | `.github/workflows/ci.yml` | `cargo test --all-targets` + `cargo build --release` |
 | `.github/workflows/release.yml` | `v*` tag 三平台构建并发布 GitHub Release |
@@ -128,6 +129,7 @@ DEFAULT_CATEGORY_COLOR = #34C7A8
 - 全局键位在 `src/main.rs::on_key()`；页面专属键位在同一函数的 `match app.page` 分支
 - 处理顺序敏感：输入条 → 删除确认 → 新建分类 → 帮助 → 全局 → 页面
 - `Ctrl+C` 分层关闭；其它 `Ctrl` 组合键一律忽略（`Ctrl+P` 在输入条内例外），避免误触单字母快捷键
+- 设置页 `v` 检查更新、`i` 下载安装：网络请求在后台线程，`App::poll_update()` 每帧收取结果，禁止在事件循环里同步请求
 - 任务标题后缀 `!1`~`!4` 在 `app.rs` 解析为优先级
 - 终端宽度自适应：顶栏 / 键位栏有 full / short / 极简三级；中文宽度用 `unicode-width`
 
@@ -148,6 +150,13 @@ DEFAULT_CATEGORY_COLOR = #34C7A8
 - `DOIT_TUI_DIR` 可覆盖数据目录，但 **`device_id()` 固定读写 `~/.doit-tui/device-id`**，不受该变量影响
 - `settings.json` 当前明文保存 WebDAV 密码；`.gitignore` 已排除 `~/.doit-tui/` 与 `doit-tui-data/`。绝不提交真实配置，也不要在日志 / 错误信息里输出 URL、账号或密码
 - `sync.rs::classify()` 只返回脱敏文案，禁止直接外抛底层网络错误字符串
+
+### 6.1 应用内更新（`src/update.rs`）
+
+- 检查更新：`api.github.com/repos/nabaonan/doit-tui/releases/latest`（public 仓库、匿名、无需 Token），语义版本比较用 `is_newer()`，平台产物后缀必须与 `.github/workflows/release.yml` 一致（macOS 两个 triple / `_win-x64.exe` / `_linux-x64`）。
+- 安装：下载裸二进制到当前可执行文件旁 `*.doit-update.new`，Unix 备份 `*.doit-update.bak` 后 `rename` 覆盖当前程序（运行中可替换），Windows 因占用只留 `.new` 并提示退出后手动替换；`MAX_ASSET_BYTES = 200MB` 防止异常大包。
+- UI 状态在 `App::{update_check_rx, update_install_rx, update_busy, update_info, update_hint}`，后台线程只发 `Result`，错误必须是安全文案；`releases_url()` 供下载地址展示。
+- 改动更新逻辑要补 `update.rs` 单测，并跑 `cargo test --offline --all-targets`。
 
 ## 7. 常用命令
 

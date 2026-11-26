@@ -244,7 +244,7 @@ pub fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ],
         Page::Settings => &[
             ("1-4", "页面"), ("u/n/p", "地址/账号/密码"), ("e", "启停同步"), ("s", "立即同步"),
-            ("t", "主题"), ("?", "帮助"), ("q", "退出"),
+            ("v", "检查更新"), ("i", "下载安装"), ("t", "主题"), ("?", "帮助"), ("q", "退出"),
         ],
     };
     let short: &[(&str, &str)] = &[
@@ -332,7 +332,7 @@ pub fn draw_toast(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 // ---------- 帮助弹框 ----------
 
 pub fn draw_help(f: &mut Frame, theme: &Theme) {
-    let area = popup_centered(f.area(), 62, 20);
+    let area = popup_centered(f.area(), 62, 21);
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -357,6 +357,7 @@ pub fn draw_help(f: &mut Frame, theme: &Theme) {
         ("h / l", "今日页折叠/展开父任务；月历页前后一天选日"),
         ("j / k", "今日页移动选中；月历页上一行/下一行（±7 天）"),
         ("s", "触发 WebDAV 同步"),
+        ("v / i", "设置页检查更新 / 下载安装到本地并替换当前程序"),
         ("←/→", "统计页切换热力图周期；月历页翻月"),
         ("g", "月历页回到今天并选中今天"),
         ("t", "切换 薄荷绿 / 深夜 主题"),

@@ -5,6 +5,7 @@ mod model;
 mod store;
 mod sync;
 mod theme;
+mod update;
 mod ui;
 
 use app::{App, InputMode, Page, SyncStatus};
@@ -37,6 +38,7 @@ fn run(
 ) -> anyhow::Result<()> {
     while !app.quit {
         app.expire_toast();
+        app.poll_update();
         let sz = terminal.size()?;
         app.area = ratatui::layout::Rect {
             x: 0,
@@ -340,6 +342,8 @@ fn on_key(key: KeyEvent, app: &mut App, store: &Store) {
             KeyCode::Char('u') => app.open_input(InputMode::WebdavUrl),
             KeyCode::Char('n') => app.open_input(InputMode::WebdavUser),
             KeyCode::Char('p') => app.open_input(InputMode::WebdavPass),
+            KeyCode::Char('v') => app.start_check_update(),
+            KeyCode::Char('i') => app.start_install_update(),
             KeyCode::Char('e') => {
                 app.settings.webdav.enabled = !app.settings.webdav.enabled;
                 let _ = store.save_settings(&app.settings);
