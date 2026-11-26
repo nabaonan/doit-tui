@@ -132,8 +132,12 @@ jobs:
           MD
 
       - name: 发布到 GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          body_path: release-body.md
-          files: artifacts/**
+        # 用 runner 自带、已用 GITHUB_TOKEN 认证的 gh CLI 创建 Release 并附带产物。
+        # （此前用第三方 softprops/action-gh-release 偶发失败，原生 gh 更稳）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" artifacts/* \
+            --title "${{ github.ref_name }}" \
+            --notes-file release-body.md
+          echo "✅ Release ${{ github.ref_name }} 已创建并附带产物"
