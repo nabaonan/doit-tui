@@ -167,7 +167,9 @@ pub struct App {
 
 impl App {
     pub fn new(store: &Store) -> Self {
-        let snap = store.load_snapshot().unwrap_or_else(|_| Snapshot::new("tui"));
+        let mut snap = store.load_snapshot().unwrap_or_else(|_| Snapshot::new("tui"));
+        // 历史脏数据自愈：删子任务后父任务没重算，或同步拉入墓碑时留下未完成父任务。
+        snap.recalc_all();
         let settings = store.load_settings();
         let theme = if settings.theme == "dark" {
             crate::theme::ThemeKind::Dark

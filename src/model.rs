@@ -403,34 +403,56 @@ impl Snapshot {
         if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
             let now = now_ms();
             recalc_subs(&mut t.subs, now);
-            let all_done = !t.subs.is_empty() && t.subs.iter().all(subtree_done);
+            let live: Vec<&Subtask> = t.subs.iter().filter(|s| s.deleted_at.is_none()).collect();
+            let all_done = !live.is_empty() && live.iter().all(|s| subtree_done(s));
             if all_done && !t.done {
                 t.done = true;
                 t.updated_at = now;
                 t.completed_at = Some(now);
-            } else if !all_done && t.done && !t.subs.is_empty() {
+            } else if !all_done && t.done && !live.is_empty() {
                 t.done = false;
                 t.updated_at = now;
                 t.completed_at = None;
             }
         }
     }
+
+    /// 载入 / 同步后自愈：历史上删子任务没重算父任务，会留下"子任务全完成但父任务未完成"。
+    pub fn recalc_all(&mut self) {
+        let ids: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| t.deleted_at.is_none())
+            .map(|t| t.id.clone())
+            .collect();
+        for id in ids {
+            self.recalc_parent(&id);
+        }
+    }
 }
 
-/// 子树整体完成：叶子节点看自身 done；有子节点的节点看所有后代叶子。
+/// 子树整体完成：墓碑子任务视为不存在（完成判定跳过）；活跃叶子看自身 done。
 pub fn subtree_done(u: &Subtask) -> bool {
-    if u.subs.is_empty() {
+    if u.deleted_at.is_some() {
+        return true;
+    }
+    let live: Vec<&Subtask> = u.subs.iter().filter(|s| s.deleted_at.is_none()).collect();
+    if live.is_empty() {
         u.done
     } else {
-        u.subs.iter().all(subtree_done)
+        live.iter().all(|s| subtree_done(s))
     }
 }
 
 fn recalc_subs(subs: &mut [Subtask], now: i64) {
     for s in subs.iter_mut() {
+        if s.deleted_at.is_some() {
+            continue;
+        }
         recalc_subs(&mut s.subs, now);
-        if !s.subs.is_empty() {
-            let all = s.subs.iter().all(subtree_done);
+        let live: Vec<&Subtask> = s.subs.iter().filter(|c| c.deleted_at.is_none()).collect();
+        if !live.is_empty() {
+            let all = live.iter().all(|c| subtree_done(c));
             if all && !s.done {
                 s.done = true;
                 s.updated_at = now;
@@ -716,5 +738,52 @@ mod tests {
         assert_eq!(crate::theme::normalize_category_color("#34c7a8"), "#34C7A8");
         assert_eq!(crate::theme::normalize_category_color("red"), "#34C7A8");
         assert_eq!(crate::theme::normalize_category_color(""), "#34C7A8");
+    }
+
+    fn task_with_subs(subs: Vec<Subtask>) -> Task {
+        Task {
+            id: "t1".into(), title: "顶级".into(), category: "工作".into(), priority: 2,
+            done: false, created_at: 100, updated_at: 100, completed_at: None,
+            subs, deleted_at: None, sort_order: 0,
+        }
+    }
+
+    #[test]
+    fn tombstoned_subtask_does_not_block_parent_completion() {
+        let mut done = sub("a", "已完成");
+        done.done = true;
+        let mut deleted = sub("b", "已删除");
+        deleted.deleted_at = Some(200);
+        let mut snap = Snapshot::new("test");
+        snap.tasks.push(task_with_subs(vec![done, deleted]));
+        snap.recalc_all();
+        let t = &snap.tasks[0];
+        assert!(t.done, "有效子任务全完成时父任务应自动完成");
+        assert!(t.completed_at.is_some());
+    }
+
+    #[test]
+    fn tombstoned_grandchild_does_not_block_nested_completion() {
+        let mut inner_done = sub("g", "孙任务");
+        inner_done.done = true;
+        let mut inner_deleted = sub("g2", "已删除孙任务");
+        inner_deleted.deleted_at = Some(200);
+        let mut outer = sub("c", "子任务");
+        outer.subs = vec![inner_done, inner_deleted];
+        let mut snap = Snapshot::new("test");
+        snap.tasks.push(task_with_subs(vec![outer]));
+        snap.recalc_all();
+        assert!(snap.tasks[0].subs[0].done, "墓碑孙任务不应阻塞子任务完成");
+        assert!(snap.tasks[0].done, "子任务全完成时父任务应自动完成");
+    }
+
+    #[test]
+    fn active_undone_subtask_still_blocks_parent() {
+        let mut done = sub("a", "已完成");
+        done.done = true;
+        let mut snap = Snapshot::new("test");
+        snap.tasks.push(task_with_subs(vec![done, sub("b", "未完成")]));
+        snap.recalc_all();
+        assert!(!snap.tasks[0].done);
     }
 }

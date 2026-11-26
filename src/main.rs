@@ -378,7 +378,9 @@ fn do_sync(app: &mut App, store: &Store) {
     }
     app.sync_status = SyncStatus::Syncing;
     match sync::sync(store, &app.snap, &app.settings.webdav) {
-        Ok((merged, note)) => {
+        Ok((mut merged, note)) => {
+            // 远端墓碑 / 完成态可能让父任务完成判定过时，落盘前先自愈。
+            merged.recalc_all();
             app.snap = merged;
             app.revision = app.snap.revision;
             app.sync_status = SyncStatus::Synced;

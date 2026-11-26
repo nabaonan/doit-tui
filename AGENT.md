@@ -90,7 +90,8 @@ WireTask { uid, parentUid, title, category, priority, done,
 
 任务、子任务、分类删除一律写 `deleted_at`，禁止物理移除：
 
-- `app.rs::del_selected()` 给顶级任务或递归子树打墓碑
+- `app.rs::del_selected()` 给顶级任务或递归子树打墓碑；删子任务后调 `recalc_parent()`，墓碑子任务不参与完成判定
+- `model.rs::subtree_done()` / `recalc_subs()` 忽略墓碑；`Snapshot::recalc_all()` 在启动和同步落盘前自愈「子任务全完成但父任务未完成」的历史脏数据
 - `app.rs::delete_category()` 给分类打墓碑，并把其任务迁移到「默认」
 - `model.rs::active_tasks()` / `active_categories()` / `collect_subs()` 负责过滤墓碑
 - 只有同步合并明确判定「删除后对方发生真实编辑」才允许复活
