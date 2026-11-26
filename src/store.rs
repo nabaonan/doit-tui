@@ -15,6 +15,10 @@ pub struct Settings {
     pub theme: String, // "light" | "dark"，空 = 跟随默认
     #[serde(default)]
     pub webdav: WebDavSettings,
+    /// 今日待办「紧急优先」：只重排顶级任务（4→0），子任务顺序不变。
+    /// 纯本地显示偏好，不进同步快照。
+    #[serde(default)]
+    pub sort_by_priority: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

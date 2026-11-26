@@ -75,16 +75,31 @@ pub fn draw_topbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         left.push(Span::raw(" "));
     }
 
-    // 右侧：同步胶囊 + 日期环形进度胶囊；宽度不足时逐级精简
+    // 右侧：紧急优先（仅今日页）+ 同步胶囊 + 日期环形进度胶囊；宽度不足时逐级精简
     let sync_c = app.sync_status.color(theme);
     let sync_full = format!(" ● {} r{} ", app.sync_status.label(), app.revision);
     let sync_mid = format!(" ● {} ", app.sync_status.label());
     let date_full = format!(" {}月{}日 {} {}{}% ", now.month(), now.day(), zh_weekday(now.weekday()), ring_char(pct), pct);
     let date_mid = format!(" {}/{} {}{}% ", now.month(), now.day(), ring_char(pct), pct);
+    let urgent = priority_color(4).unwrap_or(theme.accent);
 
     let width = area.width as usize;
     let left_w: usize = left.iter().map(|s| disp_w(&s.content)).sum();
-    let fits = |a: &str, b: &str| left_w + disp_w(a) + disp_w(b) <= width;
+    // 先按最精简的旗标占位，再决定要不要展开成完整文字，避免窄屏挤掉同步状态。
+    let mut sort_txt = if app.page == Page::Today {
+        if app.settings.sort_by_priority {
+            " ⚑紧急优先✓ "
+        } else {
+            " ⚑紧急优先 "
+        }
+    } else {
+        ""
+    };
+    if !sort_txt.is_empty() && left_w + disp_w(sort_txt) + disp_w(&sync_mid) > width {
+        sort_txt = " ⚑ ";
+    }
+    let sort_w = disp_w(sort_txt);
+    let fits = |a: &str, b: &str| left_w + sort_w + disp_w(a) + disp_w(b) <= width;
     let (sync_txt, date_txt) = if fits(&sync_full, &date_full) {
         (sync_full, date_full)
     } else if fits(&sync_mid, &date_full) {
@@ -96,9 +111,17 @@ pub fn draw_topbar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
 
     let mut spans = left;
-    let right_w = disp_w(&sync_txt) + disp_w(&date_txt);
+    let right_w = sort_w + disp_w(&sync_txt) + disp_w(&date_txt);
     let pad = width.saturating_sub(left_w + right_w);
     spans.push(Span::raw(" ".repeat(pad)));
+    if !sort_txt.is_empty() {
+        let style = if app.settings.sort_by_priority {
+            Style::default().bg(urgent).fg(theme.panel).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(theme.panel).fg(urgent)
+        };
+        spans.push(Span::styled(sort_txt, style));
+    }
     spans.push(Span::styled(
         sync_txt,
         Style::default().bg(theme.panel).fg(sync_c),
@@ -231,7 +254,7 @@ pub fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         Page::Today => &[
             ("1-4", "页面"), ("[ ]", "分类"), ("c", "新建分类"), ("h/l", "折叠"),
             ("j/k", "移动"), ("space", "完成"), ("a", "新增"), ("e", "编辑"), ("d", "删除"),
-            ("p", "优先级"), ("s", "同步"), ("t", "主题"), ("?", "帮助"), ("q", "退出"),
+            ("p", "优先级"), ("o", "紧急优先"), ("s", "同步"), ("t", "主题"), ("?", "帮助"), ("q", "退出"),
         ],
         Page::Stats => &[
             ("1-4", "页面"), ("[ ]", "分类"), ("←/→", "热力周期"),
@@ -332,7 +355,7 @@ pub fn draw_toast(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 // ---------- 帮助弹框 ----------
 
 pub fn draw_help(f: &mut Frame, theme: &Theme) {
-    let area = popup_centered(f.area(), 62, 21);
+    let area = popup_centered(f.area(), 62, 23);
     f.render_widget(Clear, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -354,6 +377,7 @@ pub fn draw_help(f: &mut Frame, theme: &Theme) {
         ("e", "编辑选中标题（已完成不可编辑）"),
         ("d", "删除选中任务"),
         ("p", "循环切换优先级 0不设→1低→2普通→3高→4紧急"),
+        ("o", "今日页紧急优先：只重排顶级任务，子任务顺序不变"),
         ("h / l", "今日页折叠/展开父任务；月历页前后一天选日"),
         ("j / k", "今日页移动选中；月历页上一行/下一行（±7 天）"),
         ("s", "触发 WebDAV 同步"),

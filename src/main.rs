@@ -319,6 +319,7 @@ fn on_key(key: KeyEvent, app: &mut App, store: &Store) {
             KeyCode::Char('e') => app.open_input(InputMode::Edit),
             KeyCode::Char('d') => app.del_selected(store),
             KeyCode::Char('p') => app.cycle_pri(store),
+            KeyCode::Char('o') => app.toggle_sort_by_priority(store),
             KeyCode::Char('h') => app.toggle_fold(true),
             KeyCode::Char('l') => app.toggle_fold(false),
             _ => {}

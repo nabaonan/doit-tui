@@ -329,11 +329,27 @@ impl App {
     // ---------- 列表与选中 ----------
 
     pub fn cat_tasks(&self) -> Vec<&Task> {
-        if self.cat == "全部" {
+        let mut tasks: Vec<&Task> = if self.cat == "全部" {
             self.snap.active_tasks().collect()
         } else {
             self.snap.tasks.iter().filter(|t| t.deleted_at.is_none() && t.category == self.cat).collect()
+        };
+        // 「紧急优先」只重排顶级任务，子任务在 visible_ids 里仍按原顺序展开。
+        if self.settings.sort_by_priority {
+            tasks.sort_by(|a, b| b.priority.cmp(&a.priority)); // sort_by 稳定：同级保序
         }
+        tasks
+    }
+
+    /// 切换紧急优先并立即写入 settings.json（纯本地 UI 偏好，不进同步快照）。
+    pub fn toggle_sort_by_priority(&mut self, store: &Store) {
+        self.settings.sort_by_priority = !self.settings.sort_by_priority;
+        let _ = store.save_settings(&self.settings);
+        self.toast(if self.settings.sort_by_priority {
+            "紧急优先：顶级任务按优先级排序"
+        } else {
+            "已恢复手动顺序"
+        });
     }
 
     pub fn cat_pending(&self, cat: &str) -> usize {
@@ -1050,6 +1066,60 @@ use chrono::Datelike;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urgent_priority_sorts_only_top_level_and_persists() {
+        use crate::model::{Subtask, Task};
+
+        let dir = std::env::temp_dir().join(format!("doit-tui-sort-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::with_dir(dir.clone());
+        let mut app = App::new(&store);
+
+        let top = |id: &str, title: &str, priority: u8, subs: Vec<Subtask>| Task {
+            id: id.into(),
+            title: title.into(),
+            category: "全部".into(),
+            priority,
+            done: false,
+            created_at: 0,
+            updated_at: 0,
+            completed_at: None,
+            subs,
+            deleted_at: None,
+            sort_order: 0,
+        };
+        let sub = |id: &str, title: &str, priority: u8| Subtask {
+            id: id.into(),
+            title: title.into(),
+            priority,
+            done: false,
+            created_at: 0,
+            updated_at: 0,
+            completed_at: None,
+            subs: vec![],
+            deleted_at: None,
+            sort_order: 0,
+        };
+        app.snap.tasks = vec![
+            top("a", "不设", 0, vec![]),
+            top("b", "紧急甲", 4, vec![sub("s1", "子一", 0), sub("s2", "子二", 4)]),
+            top("c", "普通", 2, vec![]),
+            top("d", "紧急乙", 4, vec![]),
+        ];
+        app.settings.sort_by_priority = true;
+        app.expanded = vec!["b".into()];
+
+        let ids: Vec<String> = app.visible_ids().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["b", "s1", "s2", "d", "c", "a"]);
+
+        app.toggle_sort_by_priority(&store);
+        assert!(!app.settings.sort_by_priority);
+        assert!(!store.load_settings().sort_by_priority, "偏好应写入 settings.json");
+        let ids: Vec<String> = app.visible_ids().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["a", "b", "s1", "s2", "c", "d"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pri_suffix_parsed() {
